@@ -432,6 +432,65 @@ function computeBadges(up,results,isLeader){
   return b;
 }
 
+// ══ LIVE ΑΠΟΤΕΛΕΣΜΑΤΑ (ESPN — δωρεαν, χωρις κλειδι) ══
+const ESPN_SLUG={UCL:"uefa.champions",UEL:"uefa.europa"};
+// Κλειδι-λεξη ανα ομαδα, για ταιριασμα με τα ονοματα του ESPN
+const TEAM_KEY={
+"AEK Athens":"aek","LASK":"lask","Club Brugge":"brugge","Aston Villa":"aston villa",
+"Borussia Dortmund":"dortmund","Villarreal":"villarreal","Porto":"porto","Manchester City":"manchester city",
+"Lille":"lille","Real Betis":"betis","Real Madrid":"real madrid","Inter":"inter",
+"Barcelona":"barcelona","Feyenoord":"feyenoord","Stuttgart":"stuttgart","Viking":"viking",
+"Liverpool":"liverpool","Atletico Madrid":"atletico","Paris Saint-Germain":"paris","Slovan Bratislava":"slovan",
+"Sporting CP":"sporting","Galatasaray":"galatasaray","Napoli":"napoli","Arsenal":"arsenal",
+"Fenerbahce":"fenerbah","Roma":"roma","PSV Eindhoven":"psv","Shakhtar Donetsk":"shakhtar",
+"Como":"como","Leipzig":"leipzig","Bayern Munchen":"bayern","Bodo/Glimt":"glimt",
+"Manchester United":"manchester united","Sabah":"sabah","Slavia Praha":"slavia","Lens":"lens",
+"Ararat-Armenia":"ararat","Sparta Praha":"sparta","Omonia":"omonia","Celta":"celta",
+"Milan":"milan","Benfica":"benfica","Leverkusen":"leverkusen","Celje":"celje",
+"H. Beer-Sheva":"sheva","GNK Dinamo":"dinamo","Olympiacos":"olympia","Jagiellonia":"jagiellonia",
+"Anderlecht":"anderlecht","Lyon":"lyon","Sturm Graz":"sturm","Rennes":"rennes",
+"Sunderland":"sunderland","AZ Alkmaar":"alkmaar","OFI Crete":"ofi","Hoffenheim":"hoffenheim",
+"Levski Sofia":"levski","Salzburg":"salzburg","Besiktas":"besikta","Marseille":"marseille",
+"Celtic":"celtic","Ferencvaros":"ferencv","Crystal Palace":"crystal palace","Lech Poznan":"lech",
+"Viktoria Plzen":"plzen","Union SG":"union","Juventus":"juventus","N.E.C.":"nec",
+"Lillestrom":"lillestr","Torreense":"torreense","Real Sociedad":"sociedad","Bournemouth":"bournemouth",
+};
+const normTeam=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+  .replace(/ø/g,"o").replace(/ß/g,"ss").replace(/[''`.]/g,"")
+  .replace(/[^a-z0-9 /]/g," ").replace(/\s+/g," ").trim();
+const sameTeam=(mine,espn)=>{const k=TEAM_KEY[mine];return k?normTeam(espn).includes(normTeam(k)):false;};
+
+// Επιστρεφει { matchId: {h,a,live,done,clock} } για τη συγκεκριμενη ημερομηνια
+async function fetchESPN(comp,date){
+  const ymd=date.replace(/-/g,"");
+  const base=`https://site.api.espn.com/apis/site/v2/sports/soccer/${ESPN_SLUG[comp]}/scoreboard?dates=${ymd}`;
+  const urls=[base,`https://api.allorigins.win/raw?url=${encodeURIComponent(base)}`];
+  let data=null,err=null;
+  for(const u of urls){
+    try{
+      const r=await fetch(u,{cache:"no-store"});
+      if(!r.ok){err=`HTTP ${r.status}`;continue;}
+      data=await r.json(); if(data?.events)break;
+    }catch(e){err=e.message;}
+  }
+  if(!data) throw new Error(err||"Δεν φορτωσαν τα δεδομενα");
+  const out={};
+  (data.events||[]).forEach(ev=>{
+    const c=ev.competitions?.[0]; if(!c)return;
+    const cs=c.competitors||[];
+    const H=cs.find(x=>x.homeAway==="home"), A=cs.find(x=>x.homeAway==="away");
+    if(!H||!A)return;
+    const hn=H.team?.displayName||H.team?.name, an=A.team?.displayName||A.team?.name;
+    const st=c.status?.type||{};
+    const done=!!st.completed, state=st.state; // pre | in | post
+    const mine=SCHEDULE.find(m=>m.comp===comp&&m.date===date&&sameTeam(m.home,hn)&&sameTeam(m.away,an));
+    if(!mine)return;
+    out[mine.id]={h:Number(H.score??0),a:Number(A.score??0),done,live:state==="in",
+      clock:c.status?.displayClock||""};
+  });
+  return out;
+}
+
 const LS="uefa_session";
 
 function LoginScreen({mode,setMode,lf,setLf,rf,setRf,lerr,rerr,onLogin,onReg,busy}){
@@ -501,6 +560,9 @@ export default function App(){
   const [matchTimes,setMatchTimes]=useState({});
   const [adjustments,setAdjustments]=useState({});
   const [nowTick,setNowTick]=useState(Date.now());
+  const [live,setLive]=useState({});        // matchId -> {h,a,live,done,clock}
+  const [syncing,setSyncing]=useState(false);
+  const [lastSync,setLastSync]=useState(null);
 
   const showToast=(msg,type="ok")=>{setToast({msg,type});setTimeout(()=>setToast(null),2600);};
   useEffect(()=>{const t=setInterval(()=>setNowTick(Date.now()),30000);return()=>clearInterval(t);},[]);
@@ -614,6 +676,34 @@ export default function App(){
   }
 
   // ── ADMIN ──
+  // ── LIVE SYNC: τραβαει απο ESPN, δειχνει live σκορ, γραφει τα ΤΕΛΙΚΑ στη βαση ──
+  const syncLive=useCallback(async(date,manual=false)=>{
+    if(!date) return;
+    setSyncing(true);
+    try{
+      const both=await Promise.all(["UCL","UEL"].map(c=>fetchESPN(c,date).catch(()=>({}))));
+      const merged={...both[0],...both[1]};
+      setLive(l=>({...l,...merged}));
+      setLastSync(Date.now());
+      // τελικα σκορ -> βαση (μονο οσα αλλαξαν)
+      const finals={};
+      Object.entries(merged).forEach(([id,v])=>{ if(v.done) finals[id]={h:v.h,a:v.a}; });
+      const changed=Object.entries(finals).filter(([id,v])=>{
+        const cur=results[id]; return !cur||cur.h!==v.h||cur.a!==v.a;
+      });
+      if(changed.length){
+        const next={...results}; changed.forEach(([id,v])=>{next[id]=v;});
+        setResults(next);
+        await supabase.from("game_data").upsert({key:"results",value:next,updated_at:new Date().toISOString()});
+        if(manual) showToast(`${changed.length} νεα αποτελεσματα`);
+      }else if(manual){
+        const n=Object.keys(merged).length;
+        showToast(n?"Ολα ενημερωμενα":"Δεν βρεθηκαν ματς");
+      }
+    }catch(e){ if(manual) showToast("Σφαλμα: "+e.message,"err"); }
+    setSyncing(false);
+  },[results]);
+
   async function saveScore(id,h,a){
     const merged={...results};
     if(h===""||a===""||h==null||a==null) delete merged[id];
@@ -662,6 +752,22 @@ export default function App(){
 
   useEffect(()=>{ if(!adminDate) setAdminDate(DATES_OF[comp][0]||""); },[comp]);
 
+  // ── ΑΥΤΟΜΑΤΟΣ ΣΥΓΧΡΟΝΙΣΜΟΣ ──
+  // Τρεχει μονο οταν υπαρχουν ματς που εχουν ξεκινησει και δεν εχουν τελικο αποτελεσμα.
+  useEffect(()=>{
+    if(!me) return;
+    const pending=SCHEDULE.filter(m=>m.date===activeDate).some(m=>{
+      if(results[m.id]) return false;               // εχει ηδη αποτελεσμα
+      const t=kickoff(m.id); if(!t) return false;
+      const [h,mi]=t.split(":").map(Number);
+      return gNow.getTime()>=new Date(`${activeDate}T${pad2(h)}:${pad2(mi)}:00`).getTime();
+    });
+    if(!pending) return;
+    syncLive(activeDate);
+    const iv=setInterval(()=>syncLive(activeDate),180000); // καθε 3 λεπτα
+    return()=>clearInterval(iv);
+  },[me,activeDate,results,nowTick>0]);
+
   async function shareLeaderboard(){
     setSharing(true);
     try{
@@ -708,6 +814,7 @@ export default function App(){
   function MatchCard({m}){
     const v=findVote(myPreds,m.id)||{pick:null,extra:null};
     const r=results[m.id];
+    const lv=live[m.id];
     const locked=isLocked(m.id,m.date);
     const o=outcome1X2(r), ex=outcomeExtra(r);
     const pw=v.pick&&o?(v.pick===o):null;
@@ -718,6 +825,7 @@ export default function App(){
       <div className={`mc${r?(pts>0?" won":pts<0?" lost":""):v.pick?" voted":""}`}>
         <div className="mc-top">
           <span className="mc-time">{locked?"🔒":"⏰"} {kickoff(m.id)}</span>
+          {lv&&lv.live&&!r&&<span className="mc-live"><i/>LIVE {lv.h}-{lv.a} {lv.clock}</span>}
           {r&&<span className={`mc-score ${pts>0?"g":pts<0?"r":"n"}`}>{r.h}-{r.a} · {pts>0?`+${pts}`:pts}</span>}
         </div>
         <div className="mc-head">
@@ -856,7 +964,11 @@ export default function App(){
       <div className="atabs">{[["results","Σκορ"],["users","Χρηστες"]].map(([k,l])=>(
         <button key={k} className={`atab${adminTab===k?" on":""}`} onClick={()=>setAdminTab(k)}>{l}</button>))}</div>
       {adminTab==="results"&&(<>
-        <div className="info">Βαλε το <b>τελικο σκορ</b>. Το app υπολογιζει μονο του 1/Χ/2, Goal-Goal και Over/Under 2.5 και μοιραζει τους ποντους.</div>
+        <div className="info">⚡ Τα αποτελεσματα ερχονται <b>αυτοματα</b> (ESPN) καθε 3 λεπτα οσο παιζουν ματς. Το κουμπι πιο κατω τα τραβαει αμεσως. Αν κατι λειψει, γραψε το σκορ με το χερι.</div>
+        <button className="sync-b" onClick={()=>syncLive(adminDate,true)} disabled={syncing}>
+          {syncing?"⏳ Ανακτηση...":"🔄 Ανακτηση αποτελεσματων"}
+        </button>
+        {lastSync&&<div className="sync-t">Τελευταιος συγχρονισμος: {new Date(lastSync).toLocaleTimeString("el-GR")}</div>}
         <div className="dstrip">{dates.map(d=><button key={d} className={`dtab${d===adminDate?" on":""}`} onClick={()=>setAdminDate(d)}>{fmtShort(d)}</button>)}</div>
         <div className="asec"><div className="asec-h">{fmtLong(adminDate)}</div>
           {ms.map(m=>{
@@ -1048,6 +1160,17 @@ border-radius:var(--r2);margin-bottom:.85rem;overflow:hidden;box-shadow:0 8px 24
 .mc-score.g{background:rgba(61,220,132,.15);color:var(--green);}
 .mc-score.r{background:rgba(255,107,107,.13);color:var(--red);}
 .mc-score.n{background:rgba(255,255,255,.06);color:var(--text2);}
+.mc-live{display:inline-flex;align-items:center;gap:.32rem;font-family:'Barlow Condensed',sans-serif;font-weight:700;
+font-size:.8rem;letter-spacing:.5px;padding:.12rem .5rem;border-radius:6px;background:rgba(255,60,60,.15);
+border:1px solid rgba(255,60,60,.4);color:#ff6b6b;}
+.mc-live i{width:7px;height:7px;border-radius:50%;background:#ff3c3c;animation:lp 1.2s infinite;}
+@keyframes lp{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.7)}}
+.sync-b{width:100%;margin-bottom:.5rem;padding:.6rem;border-radius:10px;cursor:pointer;
+font-family:'Barlow Condensed',sans-serif;font-size:1rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
+background:linear-gradient(135deg,var(--accd),var(--acc));border:none;color:#fff;box-shadow:0 4px 16px var(--accdim);}
+.sync-b:hover{filter:brightness(1.1);}
+.sync-b:disabled{opacity:.6;cursor:wait;}
+.sync-t{font-family:'Barlow Condensed',sans-serif;font-size:.78rem;color:var(--muted);text-align:center;margin-bottom:.7rem;}
 .mc-head{display:flex;align-items:center;justify-content:center;gap:.7rem;padding:.5rem .8rem .7rem;}
 .mc-side{flex:1;display:flex;flex-direction:column;align-items:center;gap:.3rem;min-width:0;}
 .mc-flag{font-size:2rem;line-height:1;}
