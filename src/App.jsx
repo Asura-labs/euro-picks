@@ -33,6 +33,30 @@ const FLAGS={
   "Jagiellonia":"🇵🇱","Lech Poznan":"🇵🇱","Levski Sofia":"🇧🇬","Ferencvaros":"🇭🇺",
 };
 const F=t=>FLAGS[t]||"⚽";
+
+// Χρωμα-υπογραφη καθε ομαδας (για διακριτικη πινελια στις καρτες)
+const TEAM_COLOR={
+"AEK Athens":"#f5d20c","LASK":"#000000","Club Brugge":"#0033a0","Aston Villa":"#95bfe5",
+"Borussia Dortmund":"#fde100","Villarreal":"#ffe667","Porto":"#0033a0","Manchester City":"#6cabdd",
+"Lille":"#d3122a","Real Betis":"#00954c","Real Madrid":"#febe10","Inter":"#0068a8",
+"Barcelona":"#a50044","Feyenoord":"#e30613","Stuttgart":"#e32219","Viking":"#003d7c",
+"Liverpool":"#c8102e","Atletico Madrid":"#cb3524","Paris Saint-Germain":"#004170","Slovan Bratislava":"#0b3d91",
+"Sporting CP":"#008057","Galatasaray":"#f5b02e","Napoli":"#12a0d7","Arsenal":"#ef0107",
+"Fenerbahce":"#ffed00","Roma":"#8e1f2f","PSV Eindhoven":"#ed1c24","Shakhtar Donetsk":"#f36f21",
+"Como":"#0b4ea2","Leipzig":"#dd0741","Bayern Munchen":"#dc052d","Bodo/Glimt":"#ffd200",
+"Manchester United":"#da291c","Sabah":"#00a0e3","Slavia Praha":"#d7141a","Lens":"#ffe500",
+"Ararat-Armenia":"#d90429","Sparta Praha":"#8b1a2b","Omonia":"#00a650","Celta":"#8ac3ee",
+"Milan":"#fb090b","Benfica":"#e42518","Leverkusen":"#e32221","Celje":"#f9e300",
+"H. Beer-Sheva":"#e4002b","GNK Dinamo":"#0d5eaf","Olympiacos":"#d0021b","Jagiellonia":"#e30613",
+"Anderlecht":"#672d91","Lyon":"#1e2f5e","Sturm Graz":"#000000","Rennes":"#e2231a",
+"Sunderland":"#eb172b","AZ Alkmaar":"#e2001a","OFI Crete":"#000000","Hoffenheim":"#1961b5",
+"Levski Sofia":"#0057b8","Salzburg":"#c8102e","Besiktas":"#000000","Marseille":"#2faee0",
+"Celtic":"#018749","Ferencvaros":"#009543","Crystal Palace":"#1b458f","Lech Poznan":"#0057b8",
+"Viktoria Plzen":"#e30613","Union SG":"#f7d417","Juventus":"#000000","N.E.C.":"#e30613",
+"Lillestrom":"#f8ec31","Torreense":"#009a44","Real Sociedad":"#0067b1","Bournemouth":"#da291c",
+};
+const TC=t=>TEAM_COLOR[t]||"#8892a8";
+
 function noAccent(s){return s.replace(/[άΆ]/g,"Α").replace(/[έΈ]/g,"Ε").replace(/[ήΉ]/g,"Η").replace(/[ίΊϊΪ]/g,"Ι").replace(/[όΌ]/g,"Ο").replace(/[ύΎϋΫ]/g,"Υ").replace(/[ώΏ]/g,"Ω");}
 const caps=s=>noAccent(s).toUpperCase();
 
@@ -356,13 +380,47 @@ const fmtLong=s=>!s?"":new Date(s+"T12:00:00").toLocaleDateString("el-GR",{weekd
 // results[matchId] = {h:2,a:1}
 const outcome1X2=r=>!r?null:(r.h>r.a?"1":r.h<r.a?"2":"X");
 const outcomeExtra=r=>{ if(!r)return null; const tot=r.h+r.a; return {GG:(r.h>0&&r.a>0), OV:tot>=3, UN:tot<=2}; };
-// ενα ματς: βασικη +1/-1, εξτρα +1/-1 (0 αν δεν παιχτηκε)
-function matchPoints(pick,extra,r){
+// ── ΚΑΝΟΝΕΣ ΒΑΘΜΟΛΟΓΙΑΣ ──
+const PTS={PICK_OK:2, PICK_NO:-1, EXTRA_OK:1, EXTRA_NO:-1, UNDERDOG:1};
+const UNDERDOG_PCT=25;   // κατω απο αυτο το % = κοντρα στο ρευμα
+const UNDERDOG_MIN=6;    // ελαχιστοι ψηφοφοροι για να μετρησει το μπονους
+
+// Υπολογιζει, μια φορα, τα ποσοστα της παρεας για ΚΑΘΕ ματς
+function buildCrowd(predictions){
+  const c={};
+  Object.values(predictions).forEach(byDate=>{
+    Object.values(byDate||{}).forEach(byMatch=>{
+      Object.entries(byMatch||{}).forEach(([mid,v])=>{
+        if(!v||!v.pick) return;
+        c[mid]??={n:0,"1":0,"X":0,"2":0};
+        c[mid][v.pick]++; c[mid].n++;
+      });
+    });
+  });
+  return c;
+}
+const crowdPct=(cm,mid,pick)=>{
+  const c=cm?.[mid]; if(!c||!c.n) return null;
+  return Math.round(c[pick]/c.n*100);
+};
+// Ισχυει το μπονους «κοντρα στο ρευμα» για τη σωστη βασικη επιλογη;
+function isUnderdog(cm,mid,pick){
+  const c=cm?.[mid];
+  if(!c||c.n<UNDERDOG_MIN) return false;
+  return (c[pick]/c.n*100) < UNDERDOG_PCT;
+}
+// Ποντοι ενος ματς. cm = crowd map (προαιρετικο — χωρις αυτο δεν δινεται μπονους)
+function matchPoints(pick,extra,r,cm,mid){
   if(!r) return 0;
   let p=0;
   const o=outcome1X2(r);
-  if(pick) p += (pick===o?1:-1);
-  if(extra){ const ex=outcomeExtra(r); p += (ex[extra]?1:-1); }
+  if(pick){
+    if(pick===o){
+      p+=PTS.PICK_OK;
+      if(isUnderdog(cm,mid,pick)) p+=PTS.UNDERDOG;
+    } else p+=PTS.PICK_NO;
+  }
+  if(extra){ const ex=outcomeExtra(r); p += (ex[extra]?PTS.EXTRA_OK:PTS.EXTRA_NO); }
   return p;
 }
 function findVote(up,matchId){
@@ -370,20 +428,20 @@ function findVote(up,matchId){
   for(const d in up){ if(up[d]&&up[d][matchId]) return up[d][matchId]; }
   return null;
 }
-function totalPoints(up,results,comp){
+function totalPoints(up,results,comp,cm){
   let t=0;
   SCHEDULE.forEach(m=>{
     if(comp&&m.comp!==comp) return;
     const v=findVote(up,m.id); if(!v) return;
-    t+=matchPoints(v.pick,v.extra,results[m.id]);
+    t+=matchPoints(v.pick,v.extra,results[m.id],cm,m.id);
   });
   return t;
 }
-function dayPoints(date,up,results,comp){
+function dayPoints(date,up,results,comp,cm){
   let t=0;
   SCHEDULE.filter(m=>m.date===date&&(!comp||m.comp===comp)).forEach(m=>{
     const v=findVote(up,m.id); if(!v) return;
-    t+=matchPoints(v.pick,v.extra,results[m.id]);
+    t+=matchPoints(v.pick,v.extra,results[m.id],cm,m.id);
   });
   return t;
 }
@@ -557,6 +615,8 @@ export default function App(){
   const [confetti,setConfetti]=useState(false);
   const [sharing,setSharing]=useState(false);
   const [lbComp,setLbComp]=useState("ALL");
+  const [openExtra,setOpenExtra]=useState({});   // matchId -> ανοιχτο το εξτρα
+  const [viewDate,setViewDate]=useState(null);   // ποια αγωνιστικη βλεπουμε
   const prevPtsRef=useRef(null);
 
   const [users,setUsers]=useState([]);
@@ -585,6 +645,20 @@ export default function App(){
     const [h,m]=t.split(":").map(Number); if(isNaN(h)) return false;
     const ko=new Date(`${date}T${pad2(h)}:${pad2(m)}:00`);
     return gNow.getTime()>=ko.getTime()-15*60*1000;
+  }
+
+
+  // Πoση ωρα μενει μεχρι το κλειδωμα (15' πριν τη σεντρα)
+  function lockIn(id,date){
+    const t=kickoff(id); if(!t) return null;
+    const [h,mi]=t.split(":").map(Number); if(isNaN(h)) return null;
+    const lockAt=new Date(`${date}T${pad2(h)}:${pad2(mi)}:00`).getTime()-15*60*1000;
+    const diff=lockAt-gNow.getTime();
+    if(diff<=0) return null;
+    const mins=Math.floor(diff/60000);
+    const d=Math.floor(mins/1440), hh=Math.floor((mins%1440)/60), mm=mins%60;
+    return {mins, urgent:mins<=30,
+      txt: d>0 ? `${d}μ ${hh}ω` : hh>0 ? `${hh}ω ${mm}′` : `${mm}′`};
   }
 
   const loadAll=useCallback(async()=>{
@@ -672,11 +746,17 @@ export default function App(){
   async function vote(m,field,val){
     if(isLocked(m.id,m.date)){showToast("Η ψηφοφορια εκλεισε","err");return;}
     const cur=findVote(predictions[me.id],m.id)||{pick:null,extra:null};
-    if(cur[field]) return; // κλειδωμενο μολις μπει
-    const next={...cur,[field]:val};
+    // Ξαναπατημα της ιδιας ΕΞΤΡΑ επιλογης = αφαιρεση (ειναι προαιρετικη)
+    const isSame = cur[field]===val;
+    if(isSame && field==="pick") return;              // η βασικη δεν αφαιρειται
+    const next={...cur,[field]: isSame ? null : val};
     setPredictions(prev=>{const n={...prev};n[me.id]??={};n[me.id][m.date]??={};
       n[me.id][m.date]={...n[me.id][m.date],[m.id]:next};return n;});
-    showToast(field==="pick"?"Ψηφος κλειδωθηκε":"Εξτρα επιλογη κλειδωθηκε");
+    showToast(
+      isSame ? "Εξτρα επιλογη αφαιρεθηκε"
+      : cur[field] ? "Η επιλογη σου αλλαξε"
+      : field==="pick" ? "Ψηφισες" : "Εξτρα επιλογη"
+    );
     const {error}=await supabase.from("predictions")
       .upsert({user_id:me.id,match_id:m.id,match_date:m.date,pick:next.pick,extra:next.extra},{onConflict:"user_id,match_id"});
     if(error){showToast("Σφαλμα — δοκιμασε ξανα","err");loadAll();}
@@ -764,14 +844,27 @@ export default function App(){
 
   // ── DERIVED ──
   const myPreds=me?(predictions[me.id]||{}):{};
+  const crowdMap=buildCrowd(predictions);   // ποσοστα παρεας ανα ματς (μια φορα)
   const board=users.map(u=>{
     const p=predictions[u.id]||{};
     const adj=adjustments[u.id]||0;
     return {...u,isAdmin:u.is_admin,adj,
-      ucl:totalPoints(p,results,"UCL"), uel:totalPoints(p,results,"UEL"),
-      total:totalPoints(p,results,null)+adj};
+      ucl:totalPoints(p,results,"UCL",crowdMap), uel:totalPoints(p,results,"UEL",crowdMap),
+      total:totalPoints(p,results,null,crowdMap)+adj};
   }).sort((a,b)=>(lbComp==="ALL"?b.total-a.total:lbComp==="UCL"?b.ucl-a.ucl:b.uel-a.uel));
   const myBoard=board.find(u=>u.id===me?.id);
+  // Καταταξη ΠΡΙΝ την τελευταια αγωνιστικη με αποτελεσματα (για τα βελακια)
+  const datesWithRes=ALL_DATES.filter(d=>SCHEDULE.some(m=>m.date===d&&results[m.id]));
+  const lastResDate=datesWithRes[datesWithRes.length-1];
+  const prevRank=(()=>{
+    if(!lastResDate) return {};
+    const prevRes={};
+    Object.entries(results).forEach(([id,v])=>{ if(SCHED_BY_ID[id]?.date!==lastResDate) prevRes[id]=v; });
+    const pb=users.map(u=>({id:u.id,
+      t:totalPoints(predictions[u.id]||{},prevRes,lbComp==="ALL"?null:lbComp,crowdMap)+(lbComp==="ALL"?(adjustments[u.id]||0):0)}))
+      .sort((a,b)=>b.t-a.t);
+    const r={}; pb.forEach((u,i)=>{r[u.id]=i+1;}); return r;
+  })();
   const todayMatches=matchesOn(comp,activeDate);
 
   useEffect(()=>{
@@ -782,7 +875,7 @@ export default function App(){
     prevPtsRef.current=t;
   },[myBoard?.total,me]);
 
-  useEffect(()=>{ if(!adminDate) setAdminDate(DATES_OF[comp][0]||""); },[comp]);
+  useEffect(()=>{ setViewDate(null); if(!adminDate) setAdminDate(DATES_OF[comp][0]||""); },[comp]);
 
   // ── ΑΥΤΟΜΑΤΟΣ ΣΥΓΧΡΟΝΙΣΜΟΣ ──
   // Τρεχει μονο οταν υπαρχουν ματς που εχουν ξεκινησει και δεν εχουν τελικο αποτελεσμα.
@@ -858,13 +951,19 @@ export default function App(){
     const o=outcome1X2(r), ex=outcomeExtra(r);
     const pw=v.pick&&o?(v.pick===o):null;
     const ew=v.extra&&ex?ex[v.extra]:null;
-    const pts=matchPoints(v.pick,v.extra,r);
+    const pts=matchPoints(v.pick,v.extra,r,crowdMap,m.id);
+    const gotBonus=v.pick&&r&&v.pick===o&&isUnderdog(crowdMap,m.id,v.pick);
     const crowd=locked?crowdVotes(m.id,predictions):null;
+    const cd=locked?null:lockIn(m.id,m.date);
+    const showExtra=!!v.extra||!!openExtra[m.id];
     return(
       <div className={`mc${r?(pts>0?" won":pts<0?" lost":""):v.pick?" voted":""}`}>
+        <span className="mc-cl" style={{background:`linear-gradient(180deg,${TC(m.home)},${TC(m.away)})`}}/>
         <div className="mc-top">
           <span className="mc-time">{locked?"🔒":"⏰"} {kickoff(m.id)}</span>
-          {lv&&lv.live&&!r&&<span className="mc-live"><i/>LIVE {lv.h}-{lv.a} {lv.clock}</span>}
+          {cd&&<span className={`mc-cd${cd.urgent?" urg":""}`}>κλειδωνει σε {cd.txt}</span>}
+          {gotBonus&&<span className="mc-udg">🎖️ +1</span>}
+          {lv&&lv.live&&!r&&<span className="mc-live"><i/>{lv.h}-{lv.a} {lv.clock}</span>}
           {r&&<span className={`mc-score ${pts>0?"g":pts<0?"r":"n"}`}>{r.h}-{r.a} · {pts>0?`+${pts}`:pts}</span>}
         </div>
         <div className="mc-head">
@@ -872,27 +971,33 @@ export default function App(){
           <span className="mc-vs">VS</span>
           <div className="mc-side"><TeamBadge name={m.away}/><span className="mc-team">{m.away}</span></div>
         </div>
-        <div className="mc-lbl">Βασικη επιλογη <span className="mc-pt">±1</span></div>
         <div className="mc-row3">
           {["1","X","2"].map(k=>(
-            <button key={k} className={`vb${v.pick===k?` sel${pw===true?" ok":pw===false?" no":""}`:""}${locked||v.pick?" lk":""}`}
-              onClick={()=>!locked&&!v.pick&&vote(m,"pick",k)}>
+            <button key={k} className={`vb${v.pick===k?` sel${pw===true?" ok":pw===false?" no":""}`:""}${locked?" lk":""}`}
+              onClick={()=>!locked&&vote(m,"pick",k)}>
               <span className="vb-k">{k}</span>
               <span className="vb-s">{k==="1"?"ΓΗΠΕΔ.":k==="X"?"ΙΣΟΠ.":"ΦΙΛΟΞ."}</span>
               {crowd&&crowd.n>0&&<span className="vb-p">{k==="1"?crowd.p1:k==="X"?crowd.pX:crowd.p2}%</span>}
             </button>
           ))}
         </div>
-        <div className="mc-lbl">Εξτρα <span className="mc-opt">προαιρετικο</span> <span className="mc-pt">±1</span></div>
-        <div className="mc-row3">
-          {[["GG","GOAL/GOAL"],["OV","OVER 2.5"],["UN","UNDER 2.5"]].map(([k,l])=>(
-            <button key={k} className={`vb xb${v.extra===k?` sel${ew===true?" ok":ew===false?" no":""}`:""}${locked||v.extra?" lk":""}`}
-              onClick={()=>!locked&&!v.extra&&vote(m,"extra",k)}>
-              <span className="vb-x">{l}</span>
-              {crowd&&crowd.ne>0&&<span className="vb-p">{k==="GG"?crowd.pGG:k==="OV"?crowd.pOV:crowd.pUN}%</span>}
+        {!showExtra
+          ? <button className="ex-toggle" onClick={()=>setOpenExtra(o=>({...o,[m.id]:true}))}>
+              <span>+ Εξτρα επιλογη</span><em>GG · Over · Under · +1/−1</em>
             </button>
-          ))}
-        </div>
+          : <div className="ex-wrap">
+              <div className="mc-lbl">Εξτρα <span className="mc-opt">προαιρετικο</span> <span className="mc-pt">+1 / −1</span></div>
+              <div className="mc-row3">
+                {[["GG","GOAL/GOAL"],["OV","OVER 2.5"],["UN","UNDER 2.5"]].map(([k,l])=>(
+                  <button key={k} className={`vb xb${v.extra===k?` sel${ew===true?" ok":ew===false?" no":""}`:""}${locked?" lk":""}`}
+                    onClick={()=>!locked&&vote(m,"extra",k)}>
+                    <span className="vb-x">{l}</span>
+                    {crowd&&crowd.ne>0&&<span className="vb-p">{k==="GG"?crowd.pGG:k==="OV"?crowd.pOV:crowd.pUN}%</span>}
+                  </button>
+                ))}
+              </div>
+            </div>}
+        {!locked&&v.pick&&<div className="mc-edit">✏️ Μπορεις να αλλαξεις μεχρι το κλειδωμα</div>}
         {locked&&<Reveal matchId={m.id}/>}
       </div>
     );
@@ -908,29 +1013,74 @@ export default function App(){
   }
 
   function renderPredict(){
-    const ms=todayMatches;
-    const md=MD_OF[comp+activeDate];
-    if(!ms.length){
-      const next=DATES_OF[comp].find(d=>d>=activeDate);
-      return(<div className="empty"><div className="e-i">{COMPS[comp].icon}</div>
-        <h3>ΔΕΝ ΕΧΕΙ ΜΑΤΣ ΣΗΜΕΡΑ</h3>
-        <p>{next?<>Επομενη αγωνιστικη:<br/><b>{fmtLong(next)}</b></>:"Η διοργανωση ολοκληρωθηκε."}</p></div>);
+    const dts=DATES_OF[comp];
+    // ποια αγωνιστικη δειχνουμε: η επιλεγμενη, αλλιως η σημερινη, αλλιως η επομενη
+    const auto = dts.includes(activeDate) ? activeDate : (dts.find(d=>d>=activeDate)||dts[dts.length-1]);
+    const shown = (viewDate&&dts.includes(viewDate)) ? viewDate : auto;
+    const idx = dts.indexOf(shown);
+    const ms = matchesOn(comp,shown);
+    const md = MD_OF[comp+shown];
+    const isToday = shown===activeDate;
+    const future = shown>activeDate;
+
+    // countdown για μελλοντικη αγωνιστικη
+    let premiere=null;
+    if(future&&ms.length){
+      const t=kickoff(ms[0].id)||"22:00";
+      const [hh,mm]=t.split(":").map(Number);
+      const diff=new Date(`${shown}T${pad2(hh)}:${pad2(mm)}:00`).getTime()-gNow.getTime();
+      if(diff>0){
+        const mins=Math.floor(diff/60000);
+        premiere={d:Math.floor(mins/1440),h:Math.floor((mins%1440)/60),m:mins%60};
+      }
     }
     const votedN=ms.filter(m=>findVote(myPreds,m.id)?.pick).length;
-    const dayP=dayPoints(activeDate,myPreds,results,comp);
+    const dayP=dayPoints(shown,myPreds,results,comp,crowdMap);
+
     return(<>
-      <div className="hero">
-        <div className="hero-glow"/>
-        <div className="hero-ic">{COMPS[comp].icon}</div>
-        <div className="hero-tx">
-          <div className="hero-eye">{caps(COMPS[comp].name)}</div>
-          <div className="hero-t">ΑΓΩΝΙΣΤΙΚΗ {md}</div>
-          <div className="hero-tag">{ms.length} ΜΑΤΣ · {votedN} ΨΗΦΙΣΕΣ</div>
+      <div className="mdnav">
+        <button className="mdn-b" disabled={idx<=0} onClick={()=>setViewDate(dts[idx-1])}>‹</button>
+        <div className="mdn-c">
+          <div className="mdn-t">ΑΓΩΝΙΣΤΙΚΗ {md}</div>
+          <div className="mdn-d">{caps(fmtLong(shown))}</div>
         </div>
-        <div className="hero-pts"><div className="hp-n">{dayP>0?`+${dayP}`:dayP}</div><div className="hp-l">ΣΗΜΕΡΑ</div></div>
+        <button className="mdn-b" disabled={idx>=dts.length-1} onClick={()=>setViewDate(dts[idx+1])}>›</button>
       </div>
-      <div className="lockbar">🔒 Καθε ματς κλειδωνει 15' πριν · Σωστο +1, Λαθος −1</div>
-      {ms.map(m=><MatchCard key={m.id} m={m}/>)}
+      {!isToday&&<button className="mdn-today" onClick={()=>setViewDate(null)}>↺ Επιστροφη στη σημερινη</button>}
+
+      {premiere&&(
+        <div className="prem">
+          <div className="prem-glow"/>
+          <div className="prem-lbl">{COMPS[comp].icon} ΞΕΚΙΝΑΕΙ ΣΕ</div>
+          <div className="prem-clock">
+            <div className="pc"><b>{premiere.d}</b><span>ΜΕΡΕΣ</span></div>
+            <div className="pc"><b>{premiere.h}</b><span>ΩΡΕΣ</span></div>
+            <div className="pc"><b>{premiere.m}</b><span>ΛΕΠΤΑ</span></div>
+          </div>
+          <div className="prem-sub">Ψηφισε απο τωρα και αλλαξε οποτε θες — καθε ματς κλειδωνει 15′ πριν τη σεντρα του</div>
+        </div>
+      )}
+
+      {!premiere&&(
+        <div className="hero">
+          <div className="hero-glow"/>
+          <div className="hero-ic">{COMPS[comp].icon}</div>
+          <div className="hero-tx">
+            <div className="hero-eye">{caps(COMPS[comp].name)}</div>
+            <div className="hero-t">ΑΓΩΝΙΣΤΙΚΗ {md}</div>
+            <div className="hero-tag">{ms.length} ΜΑΤΣ · {votedN} ΨΗΦΙΣΕΣ</div>
+          </div>
+          <div className="hero-pts"><div className="hp-n">{dayP>0?`+${dayP}`:dayP}</div><div className="hp-l">ΠΟΝΤΟΙ</div></div>
+        </div>
+      )}
+
+      <div className="lockbar">
+        <div>🔒 Αλλαζεις ελευθερα μεχρι 15′ πριν τη σεντρα</div>
+        <div className="lb-rules"><span>Βασικη <b>+2</b>/<b>−1</b></span><span>Εξτρα <b>+1</b>/<b>−1</b></span><span>🎖️ Κοντρα στο ρευμα <b>+1</b></span></div>
+      </div>
+      {ms.length===0
+        ? <div className="empty"><div className="e-i">{COMPS[comp].icon}</div><h3>ΔΕΝ ΕΧΕΙ ΜΑΤΣ</h3><p>Διαλεξε αλλη αγωνιστικη απο τα βελακια.</p></div>
+        : ms.map(m=><MatchCard key={m.id} m={m}/>)}
     </>);
   }
 
@@ -966,7 +1116,12 @@ export default function App(){
         <tbody>{board.map((u,i)=>{
           const p=val(u);
           return(<tr key={u.id} className={u.id===me?.id?"me":""}>
-            <td><span className={`rnk${i<3?" top":""}`}>{i===0?"🥇":i===1?"🥈":i===2?"🥉":i+1}</span></td>
+            <td><span className={`rnk${i<3?" top":""}`}>{i===0?"🥇":i===1?"🥈":i===2?"🥉":i+1}</span>
+              {(()=>{const pr=prevRank[u.id];if(!pr)return null;const d=pr-(i+1);
+                if(d>0)return <span className="mv up">▲{d}</span>;
+                if(d<0)return <span className="mv dn">▼{-d}</span>;
+                return <span className="mv eq">–</span>;})()}
+            </td>
             <td><span className="un">{u.username}{u.id===me?.id&&<span className="mb">ΕΣΥ</span>}{u.isAdmin&&" ⚙"}</span></td>
             <td><span className={`tp ${p>0?"pos":p<0?"neg":""}`}>{p>0?`+${p}`:p}</span></td>
           </tr>);})}</tbody>
@@ -992,7 +1147,7 @@ export default function App(){
       {days.length===0&&<div className="empty" style={{marginTop:"1rem"}}><div className="e-i">📋</div><h3>ΑΚΟΜΑ ΤΙΠΟΤΑ</h3><p>Μολις ψηφισεις θα εμφανιστουν εδω.</p></div>}
       {days.map(d=>{
         const ms=SCHEDULE.filter(m=>m.date===d&&findVote(myPreds,m.id));
-        const dp=dayPoints(d,myPreds,results,null);
+        const dp=dayPoints(d,myPreds,results,null,crowdMap);
         return(<div key={d} className="hday">
           <div className="hh"><span>{caps(fmtLong(d))}</span><span className={`hp ${dp>0?"pos":dp<0?"neg":""}`}>{dp>0?`+${dp}`:dp}</span></div>
           {ms.map(m=>{const v=findVote(myPreds,m.id),r=results[m.id];const o=outcome1X2(r),ex=outcomeExtra(r);
@@ -1046,7 +1201,7 @@ export default function App(){
           const p=predictions[u.id]||{};
           const days=ALL_DATES.filter(d=>SCHEDULE.some(m=>m.date===d&&findVote({[d]:p[d]},m.id)));
           const sel=clearDaySel[u.id]||days[days.length-1]||"";
-          const tot=totalPoints(p,results,null)+(adjustments[u.id]||0);
+          const tot=totalPoints(p,results,null,crowdMap)+(adjustments[u.id]||0);
           return(<div key={u.id} className="ur">
             <div className="ur-l"><span className="ur-n">{u.username}{u.is_admin?" 👑":""}</span>
               <span className={`ur-p ${tot>0?"pos":tot<0?"neg":""}`}>{tot>0?`+${tot}`:tot}</span></div>
@@ -1065,7 +1220,14 @@ export default function App(){
     </>);
   }
 
-  if(booting) return(<><style>{CSS}</style><div className={`app c-${comp}`}><div className="boot"><div className="bb">⚽</div><div className="bt">ΦΟΡΤΩΣΗ...</div></div></div></>);
+  if(booting) return(<><style>{CSS}</style><div className={`app c-${comp}`}>
+    <header className="hdr"><div className="logo"><img className="logo-img" src={LOGO} alt=""/></div></header>
+    <div className="comptabs"><div className="sk sk-tab"/><div className="sk sk-tab"/></div>
+    <div className="main">
+      <div className="sk sk-hero"/>
+      <div className="sk sk-bar"/>
+      {[0,1,2].map(i=><div key={i} className="sk sk-card" style={{animationDelay:`${i*.12}s`}}/>)}
+    </div></div></>);
 
   return(<>
     <style>{CSS}</style>
@@ -1113,7 +1275,7 @@ export default function App(){
 }
 
 const CSS=`
-@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Inter:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700;800&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 :root{--bg:#05070f;--text:#eef2ff;--text2:#a8b0c8;--muted:#6b7490;
 --acc:#3b82f6;--acc2:#93c5fd;--accd:#1e40af;--accdim:rgba(59,130,246,0.14);--accbd:rgba(59,130,246,0.38);
@@ -1221,8 +1383,19 @@ animation:rise .5s cubic-bezier(.2,.8,.2,1) both;}
 .hero-pts{text-align:center;z-index:1;flex-shrink:0;}
 .hp-n{font-size:1.9rem;font-weight:800;color:var(--acc2);line-height:1;}
 .hp-l{font-family:'Barlow Condensed',sans-serif;font-size:.62rem;font-weight:700;letter-spacing:1.5px;color:var(--muted);}
-.lockbar{font-family:'Barlow Condensed',sans-serif;font-size:.82rem;letter-spacing:.5px;color:var(--acc2);background:var(--accdim);
-border:1px solid var(--accbd);border-radius:9px;padding:.45rem .8rem;margin-bottom:.9rem;text-align:center;}
+.lockbar{font-family:'Barlow Condensed',sans-serif;font-size:.84rem;letter-spacing:.4px;color:var(--acc2);
+background:var(--glass);backdrop-filter:blur(14px);border:1px solid var(--gbd);border-radius:12px;
+padding:.5rem .8rem;margin-bottom:.9rem;text-align:center;box-shadow:inset 0 1px 0 rgba(255,255,255,.1);}
+.lb-rules{display:flex;flex-wrap:wrap;justify-content:center;gap:.3rem .55rem;margin-top:.35rem;
+font-size:.76rem;color:var(--text2);}
+.lb-rules span{white-space:nowrap;background:rgba(255,255,255,.05);border-radius:6px;padding:.06rem .4rem;}
+.lb-rules b{color:var(--acc2);}
+.mc-udg{display:inline-flex;align-items:center;font-family:'Barlow Condensed',sans-serif;font-weight:700;
+font-size:.68rem;letter-spacing:.8px;padding:.14rem .5rem;border-radius:6px;
+background:linear-gradient(135deg,rgba(255,215,0,.22),rgba(255,140,0,.16));
+border:1px solid rgba(255,200,0,.45);color:#ffd76a;box-shadow:0 0 14px rgba(255,200,0,.2);
+animation:udgIn .5s cubic-bezier(.34,1.56,.64,1) both;}
+@keyframes udgIn{from{opacity:0;transform:scale(.7)}to{opacity:1;transform:scale(1)}}
 /* MATCH CARD */
 .mc{position:relative;background:var(--glass);backdrop-filter:blur(20px) saturate(140%);-webkit-backdrop-filter:blur(20px) saturate(140%);
 border:1px solid var(--gbd);border-radius:var(--r2);margin-bottom:.85rem;overflow:hidden;
@@ -1441,4 +1614,62 @@ font-size:.9rem;letter-spacing:1.5px;text-transform:uppercase;padding:.5rem 1.2r
   .hero-t{font-size:1.3rem;}
   .mc-team{font-size:.92rem;}
 }
+/* ── ΤΥΠΟΓΡΑΦΙΑ ΣΚΟΡ (broadcast) ── */
+.mc-score,.hp-n,.tp,.pod-p,.s4n,.hp,.ur-p,.chip,.vb-k{font-family:'Oswald',sans-serif;font-weight:600;letter-spacing:.5px;}
+.hp-n,.pod-p,.tp{font-weight:700;}
+/* ── ΧΡΩΜΑ ΟΜΑΔΑΣ ── */
+.mc-cl{position:absolute;left:0;top:0;bottom:0;width:3px;opacity:.85;}
+/* ── COUNTDOWN ΚΛΕΙΔΩΜΑΤΟΣ ── */
+.mc-cd{font-family:'Barlow Condensed',sans-serif;font-size:.74rem;font-weight:600;letter-spacing:.4px;
+color:var(--muted);background:rgba(255,255,255,.05);padding:.1rem .45rem;border-radius:6px;}
+.mc-cd.urg{color:#ffb066;background:rgba(255,140,0,.14);border:1px solid rgba(255,140,0,.35);animation:pulseUrg 1.6s infinite;}
+@keyframes pulseUrg{0%,100%{opacity:1}50%{opacity:.55}}
+/* ── ΣΥΜΠΤΥΓΜΕΝΟ ΕΞΤΡΑ ── */
+.ex-toggle{display:flex;align-items:center;justify-content:center;gap:.5rem;width:calc(100% - 1.4rem);
+margin:0 .7rem .6rem;padding:.45rem;border-radius:11px;cursor:pointer;background:rgba(255,255,255,.035);
+border:1px dashed var(--gbd);color:var(--text2);transition:.18s;}
+.ex-toggle span{font-family:'Barlow Condensed',sans-serif;font-size:.85rem;font-weight:700;letter-spacing:1px;}
+.ex-toggle em{font-style:normal;font-family:'Barlow Condensed',sans-serif;font-size:.68rem;color:var(--muted);}
+.ex-toggle:hover{background:var(--accdim);border-color:var(--accbd);color:var(--acc2);}
+.ex-wrap{animation:exIn .3s ease both;}
+.mc-edit{font-family:'Barlow Condensed',sans-serif;font-size:.72rem;color:var(--muted);text-align:center;
+padding:0 .8rem .55rem;letter-spacing:.3px;}
+@keyframes exIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+/* ── ΠΛΟΗΓΗΣΗ ΑΓΩΝΙΣΤΙΚΩΝ ── */
+.mdnav{display:flex;align-items:center;gap:.5rem;margin-bottom:.7rem;}
+.mdn-b{width:40px;height:40px;flex-shrink:0;border-radius:12px;cursor:pointer;font-size:1.4rem;line-height:1;
+background:var(--glass);backdrop-filter:blur(12px);border:1px solid var(--gbd);color:var(--acc2);transition:.18s;}
+.mdn-b:hover:not(:disabled){background:var(--accdim);border-color:var(--accbd);}
+.mdn-b:disabled{opacity:.25;cursor:default;}
+.mdn-c{flex:1;text-align:center;min-width:0;}
+.mdn-t{font-family:'Barlow Condensed',sans-serif;font-size:1.05rem;font-weight:700;letter-spacing:2px;color:var(--acc2);}
+.mdn-d{font-family:'Barlow Condensed',sans-serif;font-size:.78rem;color:var(--muted);letter-spacing:.5px;}
+.mdn-today{width:100%;margin-bottom:.7rem;padding:.4rem;border-radius:10px;cursor:pointer;
+font-family:'Barlow Condensed',sans-serif;font-size:.82rem;font-weight:700;letter-spacing:1px;
+background:var(--accdim);border:1px solid var(--accbd);color:var(--acc2);}
+/* ── ΟΘΟΝΗ ΠΡΕΜΙΕΡΑΣ ── */
+.prem{position:relative;overflow:hidden;text-align:center;padding:1.4rem 1rem 1.2rem;margin-bottom:.85rem;border-radius:var(--r2);
+background:var(--glass2);backdrop-filter:blur(24px) saturate(150%);border:1px solid var(--gbd);
+box-shadow:0 12px 36px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.14);animation:rise .5s cubic-bezier(.2,.8,.2,1) both;}
+.prem-glow{position:absolute;top:-70%;left:50%;transform:translateX(-50%);width:120%;height:200%;
+background:radial-gradient(ellipse at center,var(--accdim),transparent 65%);animation:hg 4s ease-in-out infinite;}
+.prem-lbl{position:relative;font-family:'Barlow Condensed',sans-serif;font-size:.78rem;font-weight:700;
+letter-spacing:3px;color:var(--acc2);margin-bottom:.6rem;}
+.prem-clock{position:relative;display:flex;justify-content:center;gap:.5rem;}
+.pc{flex:1;max-width:88px;background:rgba(255,255,255,.06);border:1px solid var(--gbd);border-radius:14px;padding:.5rem .2rem;}
+.pc b{display:block;font-family:'Oswald',sans-serif;font-size:2rem;font-weight:700;line-height:1;color:var(--text);}
+.pc span{font-family:'Barlow Condensed',sans-serif;font-size:.6rem;font-weight:700;letter-spacing:1.5px;color:var(--muted);}
+.prem-sub{position:relative;font-family:'Barlow Condensed',sans-serif;font-size:.8rem;color:var(--text2);margin-top:.7rem;line-height:1.35;}
+/* ── ΒΕΛΑΚΙΑ ΚΑΤΑΤΑΞΗΣ ── */
+.mv{font-family:'Barlow Condensed',sans-serif;font-size:.62rem;font-weight:700;margin-left:.3rem;vertical-align:middle;}
+.mv.up{color:var(--green);}.mv.dn{color:var(--red);}.mv.eq{color:var(--muted);opacity:.5;}
+/* ── SKELETON ── */
+.sk{background:linear-gradient(100deg,rgba(255,255,255,.045) 30%,rgba(255,255,255,.1) 50%,rgba(255,255,255,.045) 70%);
+background-size:220% 100%;border-radius:var(--r2);animation:shim 1.4s linear infinite;}
+@keyframes shim{from{background-position:120% 0}to{background-position:-120% 0}}
+.sk-tab{flex:1;height:44px;border-radius:14px;}
+.sk-hero{height:92px;margin-bottom:.85rem;}
+.sk-bar{height:56px;margin-bottom:.9rem;border-radius:12px;}
+.sk-card{height:200px;margin-bottom:.85rem;}
+
 `;
