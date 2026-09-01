@@ -632,7 +632,7 @@ export default function App(){
   const [syncing,setSyncing]=useState(false);
   const [lastSync,setLastSync]=useState(null);
 
-  const showToast=(msg,type="ok")=>{setToast({msg,type});setTimeout(()=>setToast(null),2600);};
+  const showToast=(msg,type="ok")=>{setToast({msg,type});setTimeout(()=>setToast(null),1500);};
   useEffect(()=>{const t=setInterval(()=>setNowTick(Date.now()),30000);return()=>clearInterval(t);},[]);
 
   const pad2=n=>String(n).padStart(2,"0");
@@ -940,14 +940,14 @@ export default function App(){
   }
 
   // ─────────── RENDER ───────────
-  function TeamBadge({name}){
+  function teamBadge(name){
     const src=logos[name];
     return src
       ? <span className="tb"><img src={src} alt="" loading="lazy" onError={e=>{e.target.style.display="none";e.target.nextSibling.style.display="block";}}/><span className="tb-f" style={{display:"none"}}>{F(name)}</span></span>
       : <span className="tb"><span className="tb-f">{F(name)}</span></span>;
   }
 
-  function MatchCard({m}){
+  function matchCard(m){
     const v=findVote(myPreds,m.id)||{pick:null,extra:null};
     const r=results[m.id];
     const lv=live[m.id];
@@ -961,7 +961,7 @@ export default function App(){
     const cd=locked?null:lockIn(m.id,m.date);
     const showExtra=!!v.extra||!!openExtra[m.id];
     return(
-      <div className={`mc${r?(pts>0?" won":pts<0?" lost":""):v.pick?" voted":""}`}>
+      <div key={m.id} className={`mc${r?(pts>0?" won":pts<0?" lost":""):v.pick?" voted":""}`}>
         <span className="mc-cl" style={{background:`linear-gradient(180deg,${TC(m.home)},${TC(m.away)})`}}/>
         <div className="mc-top">
           <span className="mc-time">{locked?"🔒":"⏰"} {kickoff(m.id)}</span>
@@ -971,9 +971,9 @@ export default function App(){
           {r&&<span className={`mc-score ${pts>0?"g":pts<0?"r":"n"}`}>{r.h}-{r.a} · {pts>0?`+${pts}`:pts}</span>}
         </div>
         <div className="mc-head">
-          <div className="mc-side"><TeamBadge name={m.home}/><span className="mc-team">{m.home}</span></div>
+          <div className="mc-side">{teamBadge(m.home)}<span className="mc-team">{m.home}</span></div>
           <span className="mc-vs">VS</span>
-          <div className="mc-side"><TeamBadge name={m.away}/><span className="mc-team">{m.away}</span></div>
+          <div className="mc-side">{teamBadge(m.away)}<span className="mc-team">{m.away}</span></div>
         </div>
         <div className="mc-row3">
           {["1","X","2"].map(k=>(
@@ -1003,16 +1003,15 @@ export default function App(){
                 ))}
               </div>
             </div>}
-        {!locked&&v.pick&&<div className="mc-edit">✏️ Μπορεις να αλλαξεις μεχρι το κλειδωμα</div>}
-        {locked&&<Reveal matchId={m.id}/>}
+        {locked&&renderReveal(m.id)}
       </div>
     );
   }
 
-  function Reveal({matchId}){
+  function renderReveal(matchId){
     const rows=board.map(u=>({n:u.username,v:findVote(predictions[u.id],matchId)})).filter(r=>r.v&&(r.v.pick||r.v.extra));
     if(!rows.length)return null;
-    return(<div className="reveal"><div className="reveal-h">👥 Τι ψηφισαν ({rows.length})</div>
+    return(<div key={matchId+"-rv"} className="reveal"><div className="reveal-h">👥 Τι ψηφισαν ({rows.length})</div>
       <div className="reveal-l">{rows.map((r,i)=>(
         <span key={i} className="rchip">{r.n}: <b>{r.v.pick||"—"}</b>{r.v.extra&&<em> {r.v.extra}</em>}</span>
       ))}</div></div>);
@@ -1086,7 +1085,7 @@ export default function App(){
       </div>
       {ms.length===0
         ? <div className="empty"><div className="e-i">{COMPS[comp].icon}</div><h3>ΔΕΝ ΕΧΕΙ ΜΑΤΣ</h3><p>Διαλεξε αλλη αγωνιστικη απο τα βελακια.</p></div>
-        : ms.map(m=><MatchCard key={m.id} m={m}/>)}
+        : ms.map(m=>matchCard(m))}
     </>);
   }
 
@@ -1408,7 +1407,7 @@ animation:udgIn .5s cubic-bezier(.34,1.56,.64,1) both;}
 .mc{position:relative;background:var(--glass);
 border:1px solid var(--gbd);border-radius:var(--r2);margin-bottom:.85rem;overflow:hidden;
 box-shadow:0 10px 30px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.12);
-animation:rise .45s cubic-bezier(.2,.8,.2,1) both;transition:border-color .25s,box-shadow .25s;}
+transition:border-color .2s,box-shadow .2s;contain:layout paint;}
 .mc::before{content:'';position:absolute;top:0;left:12%;right:12%;height:1px;
 background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);}
 .mc.voted{border-color:var(--accbd);box-shadow:0 10px 30px rgba(0,0,0,.38),0 0 26px var(--accdim),inset 0 1px 0 rgba(255,255,255,.14);}
