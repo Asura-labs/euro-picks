@@ -57,6 +57,21 @@ const TEAM_COLOR={
 };
 const TC=t=>TEAM_COLOR[t]||"#8892a8";
 
+// Συντομα ονοματα για τις καρτες (οπως στις αθλητικες εφαρμογες)
+const SHORT={
+"Borussia Dortmund":"Dortmund","Manchester City":"Man City","Manchester United":"Man United",
+"Paris Saint-Germain":"PSG","Atletico Madrid":"Atletico","Bayern Munchen":"Bayern",
+"Shakhtar Donetsk":"Shakhtar","Slovan Bratislava":"Slovan","PSV Eindhoven":"PSV",
+"Crystal Palace":"Palace","Sporting CP":"Sporting","Viktoria Plzen":"Plzen",
+"Ararat-Armenia":"Ararat","H. Beer-Sheva":"Beer-Sheva","GNK Dinamo":"Dinamo",
+"Levski Sofia":"Levski","Lech Poznan":"Lech","Sparta Praha":"Sparta","Slavia Praha":"Slavia",
+"Sturm Graz":"Sturm","AZ Alkmaar":"AZ","Real Sociedad":"Sociedad",
+"AEK Athens":"AEK","Club Brugge":"Brugge","Real Betis":"Betis","Bodo/Glimt":"Bodo",
+"Ararat-Armenia":"Ararat","Union SG":"Union","Levski Sofia":"Levski","OFI Crete":"OFI",
+};
+const SN=t=>SHORT[t]||t;
+
+
 function noAccent(s){return s.replace(/[άΆ]/g,"Α").replace(/[έΈ]/g,"Ε").replace(/[ήΉ]/g,"Η").replace(/[ίΊϊΪ]/g,"Ι").replace(/[όΌ]/g,"Ο").replace(/[ύΎϋΫ]/g,"Υ").replace(/[ώΏ]/g,"Ω");}
 const caps=s=>noAccent(s).toUpperCase();
 
@@ -360,18 +375,18 @@ const SCHED_BY_ID=SCHEDULE.reduce((a,m)=>{a[m.id]=m;return a;},{});
 const byComp=c=>SCHEDULE.filter(m=>m.comp===c);
 const DATES_OF={UCL:[...new Set(byComp("UCL").map(m=>m.date))].sort(),UEL:[...new Set(byComp("UEL").map(m=>m.date))].sort()};
 const ALL_DATES=[...new Set(SCHEDULE.map(m=>m.date))].sort();
-const matchesOn=(comp,date)=>SCHEDULE.filter(m=>m.comp===comp&&m.date===date);
-// Αγωνιστικη (matchday) αριθμηση ανα διοργανωση
-const MD_OF={};
+const matchesOn=(comp,date,sched)=>(sched||SCHEDULE).filter(m=>m.comp===comp&&m.date===date);
+// Αριθμος αγωνιστικης ανα ΜΑΤΣ (σταθερος — δεν αλλαζει αν αναβληθει αγωνας)
+const MD_BY_ID={};
 ["UCL","UEL"].forEach(c=>{
-  const ds=DATES_OF[c]; let md=0,prev=null;
+  const ds=[...new Set(SCHEDULE.filter(m=>m.comp===c).map(m=>m.date))].sort();
+  let md=0,prev=null;
   ds.forEach(d=>{
-    // νεα αγωνιστικη αν διαφορα > 3 μερες απο την προηγουμενη
     if(prev===null||(new Date(d)-new Date(prev))/86400000>3) md++;
-    MD_OF[c+d]=md; prev=d;
+    SCHEDULE.filter(m=>m.comp===c&&m.date===d).forEach(m=>{MD_BY_ID[m.id]=md;});
+    prev=d;
   });
 });
-
 const addDays=(s,n)=>{const d=new Date(s+"T12:00:00");d.setDate(d.getDate()+n);return d.toISOString().slice(0,10);};
 const fmtShort=s=>!s?"":new Date(s+"T12:00:00").toLocaleDateString("el-GR",{day:"numeric",month:"short"});
 const fmtLong=s=>!s?"":new Date(s+"T12:00:00").toLocaleDateString("el-GR",{weekday:"long",day:"numeric",month:"long"});
@@ -438,9 +453,9 @@ function totalPoints(up,results,comp,cm){
   });
   return t;
 }
-function dayPoints(date,up,results,comp,cm){
+function dayPoints(date,up,results,comp,cm,sched){
   let t=0;
-  SCHEDULE.filter(m=>m.date===date&&(!comp||m.comp===comp)).forEach(m=>{
+  (sched||SCHEDULE).filter(m=>m.date===date&&(!comp||m.comp===comp)).forEach(m=>{
     const v=findVote(up,m.id); if(!v) return;
     t+=matchPoints(v.pick,v.extra,results[m.id],cm,m.id);
   });
@@ -617,7 +632,8 @@ export default function App(){
   const [confetti,setConfetti]=useState(false);
   const [sharing,setSharing]=useState(false);
   const [lbComp,setLbComp]=useState("ALL");
-  const [openExtra,setOpenExtra]=useState({});   // matchId -> ανοιχτο το εξτρα
+  const [openExtra,setOpenExtra]=useState({});
+  const [showRules,setShowRules]=useState(false);   // matchId -> ανοιχτο το εξτρα
   const [viewDate,setViewDate]=useState(null);   // ποια αγωνιστικη βλεπουμε
   const prevPtsRef=useRef(null);
 
@@ -629,14 +645,36 @@ export default function App(){
   const [nowTick,setNowTick]=useState(Date.now());
   const [live,setLive]=useState({});        // matchId -> {h,a,live,done,clock}
   const [logos,setLogos]=useState({});      // teamName -> logo url
+  const [matchDates,setMatchDates]=useState({}); // matchId -> νεα ημερομηνια (αναβολες)
+  const [tOffset,setTOffset]=useState(0);       // διαφορα ρολογιου συσκευης απο server
   const [syncing,setSyncing]=useState(false);
   const [lastSync,setLastSync]=useState(null);
 
   const showToast=(msg,type="ok")=>{setToast({msg,type});setTimeout(()=>setToast(null),1500);};
   useEffect(()=>{const t=setInterval(()=>setNowTick(Date.now()),30000);return()=>clearInterval(t);},[]);
 
+  // Συγχρονισμος ωρας με τον server — ωστε να μη μπορει καποιος να αλλαξει
+  // το ρολοι της συσκευης του και να ψηφισει μετα το κλειδωμα.
+  useEffect(()=>{
+    let alive=true;
+    async function syncClock(){
+      try{
+        const r=await fetch(`${SUPABASE_URL}/rest/v1/`,{method:"HEAD",headers:{apikey:SUPABASE_KEY},cache:"no-store"});
+        const d=r.headers.get("date");
+        if(d&&alive){
+          const off=new Date(d).getTime()-Date.now();
+          if(Math.abs(off)>3000) setTOffset(off);   // διορθωση μονο αν η αποκλιση ειναι ουσιαστικη
+          else setTOffset(0);
+        }
+      }catch{}
+    }
+    syncClock();
+    const iv=setInterval(syncClock,600000); // καθε 10 λεπτα
+    return()=>{alive=false;clearInterval(iv);};
+  },[]);
+
   const pad2=n=>String(n).padStart(2,"0");
-  const gNow=new Date(new Date(nowTick).toLocaleString("en-US",{timeZone:"Europe/Athens"}));
+  const gNow=new Date(new Date(nowTick+tOffset).toLocaleString("en-US",{timeZone:"Europe/Athens"}));
   const todayStr=`${gNow.getFullYear()}-${pad2(gNow.getMonth()+1)}-${pad2(gNow.getDate())}`;
   // Η τρεχουσα αγωνιστικη μερα: μεχρι τις 06:00 μετραει η χθεσινη (τα ματς τελειωνουν ~24:00)
   const activeDate = gNow.getHours()<6 ? addDays(todayStr,-1) : todayStr;
@@ -689,6 +727,7 @@ export default function App(){
         if(r.key==="matchTimes")setMatchTimes(r.value||{});
         if(r.key==="adjustments")setAdjustments(r.value||{});
         if(r.key==="logos")setLogos(r.value||{});
+        if(r.key==="matchDates")setMatchDates(r.value||{});
       });
     }catch(e){console.error(e);}
   },[]);
@@ -807,7 +846,7 @@ export default function App(){
     try{
       const all={...logos};
       for(const c of ["UCL","UEL"]){
-        for(const d of DATES_OF[c]){
+        for(const d of datesOf[c]){
           try{ const r=await fetchESPN(c,d); Object.assign(all,r.logos); }catch{}
         }
       }
@@ -825,6 +864,14 @@ export default function App(){
     setResults(merged);
     await supabase.from("game_data").upsert({key:"results",value:merged,updated_at:new Date().toISOString()});
     showToast("Αποτελεσμα αποθηκευτηκε");
+  }
+  async function moveMatch(id,newDate){
+    const merged={...matchDates};
+    if(!newDate||newDate===SCHED_BY_ID[id]?.date) delete merged[id];
+    else merged[id]=newDate;
+    setMatchDates(merged);
+    await supabase.from("game_data").upsert({key:"matchDates",value:merged,updated_at:new Date().toISOString()});
+    showToast(newDate&&newDate!==SCHED_BY_ID[id]?.date?"Ο αγωνας μεταφερθηκε":"Επανηλθε η αρχικη ημερομηνια");
   }
   async function adjustPoints(uid,d){
     const m={...adjustments,[uid]:(adjustments[uid]||0)+d};
@@ -845,16 +892,31 @@ export default function App(){
   }
 
   // ── DERIVED ──
+  // Ενεργο προγραμμα: εφαρμοζει τις μεταφορες αγωνων
+  const SCH=useMemo(()=>SCHEDULE.map(m=>matchDates[m.id]?{...m,date:matchDates[m.id]}:m),[matchDates]);
+  const datesOf=useMemo(()=>({
+    UCL:[...new Set(SCH.filter(m=>m.comp==="UCL").map(m=>m.date))].sort(),
+    UEL:[...new Set(SCH.filter(m=>m.comp==="UEL").map(m=>m.date))].sort(),
+  }),[SCH]);
+  const dateOfMatch=id=>matchDates[id]||SCHED_BY_ID[id]?.date;
   const myPreds=me?(predictions[me.id]||{}):{};
   // Βαρια υπολογισμενα — ξαναγινονται ΜΟΝΟ οταν αλλαξουν τα δεδομενα, οχι σε καθε render
   const crowdMap=useMemo(()=>buildCrowd(predictions),[predictions]);
   const board=useMemo(()=>users.map(u=>{
     const p=predictions[u.id]||{};
     const adj=adjustments[u.id]||0;
-    return {...u,isAdmin:u.is_admin,adj,
+    const st=playerStats(p,results,lbComp==="ALL"?null:lbComp);
+    return {...u,isAdmin:u.is_admin,adj,st,
       ucl:totalPoints(p,results,"UCL",crowdMap), uel:totalPoints(p,results,"UEL",crowdMap),
       total:totalPoints(p,results,null,crowdMap)+adj};
-  }).sort((a,b)=>(lbComp==="ALL"?b.total-a.total:lbComp==="UCL"?b.ucl-a.ucl:b.uel-a.uel)),
+  }).sort((a,b)=>{
+    const va=lbComp==="ALL"?a.total:lbComp==="UCL"?a.ucl:a.uel;
+    const vb=lbComp==="ALL"?b.total:lbComp==="UCL"?b.ucl:b.uel;
+    if(vb!==va) return vb-va;                              // 1. ποντοι
+    if(b.st.correct!==a.st.correct) return b.st.correct-a.st.correct; // 2. σωστες βασικες
+    if(b.st.pct!==a.st.pct) return b.st.pct-a.st.pct;      // 3. ευστοχια
+    return a.username.localeCompare(b.username,"el");      // 4. αλφαβητικα
+  }),
   [users,predictions,results,adjustments,crowdMap,lbComp]);
   const myBoard=board.find(u=>u.id===me?.id);
   const prevRank=useMemo(()=>{
@@ -869,6 +931,18 @@ export default function App(){
     const r={}; pb.forEach((u,i)=>{r[u.id]=i+1;}); return r;
   },[users,predictions,results,adjustments,crowdMap,lbComp]);
 
+  // Παικτης της τελευταιας ολοκληρωμενης αγωνιστικης
+  const mvp=useMemo(()=>{
+    const done=[...new Set(SCH.filter(m=>results[m.id]).map(m=>m.date))].sort();
+    const d=done[done.length-1];
+    if(!d) return null;
+    const rows=users.map(u=>({u,p:dayPoints(d,predictions[u.id]||{},results,null,crowdMap,SCH)}))
+      .filter(r=>r.p!==0).sort((a,b)=>b.p-a.p);
+    if(!rows.length||rows[0].p<=0) return null;
+    const top=rows.filter(r=>r.p===rows[0].p);
+    return {date:d,pts:rows[0].p,names:top.map(r=>r.u.username)};
+  },[SCH,users,predictions,results,crowdMap]);
+
   const todayMatches=matchesOn(comp,activeDate);
 
   useEffect(()=>{
@@ -879,7 +953,7 @@ export default function App(){
     prevPtsRef.current=t;
   },[myBoard?.total,me]);
 
-  useEffect(()=>{ setViewDate(null); if(!adminDate) setAdminDate(DATES_OF[comp][0]||""); },[comp]);
+  useEffect(()=>{ setViewDate(null); if(!adminDate) setAdminDate(datesOf[comp][0]||""); },[comp]);
 
   // ── ΑΥΤΟΜΑΤΟΣ ΣΥΓΧΡΟΝΙΣΜΟΣ ──
   // Τρεχει μονο οταν υπαρχουν ματς που εχουν ξεκινησει και δεν εχουν τελικο αποτελεσμα.
@@ -942,9 +1016,9 @@ export default function App(){
   // ─────────── RENDER ───────────
   function teamBadge(name){
     const src=logos[name];
-    return src
-      ? <span className="tb"><img src={src} alt="" loading="lazy" onError={e=>{e.target.style.display="none";e.target.nextSibling.style.display="block";}}/><span className="tb-f" style={{display:"none"}}>{F(name)}</span></span>
-      : <span className="tb"><span className="tb-f">{F(name)}</span></span>;
+    return <span className="bg">{src
+      ? <img src={src} alt="" loading="lazy" onError={e=>{e.target.replaceWith(document.createTextNode(F(name)));}}/>
+      : F(name)}</span>;
   }
 
   function matchCard(m){
@@ -958,50 +1032,40 @@ export default function App(){
     const pts=matchPoints(v.pick,v.extra,r,crowdMap,m.id);
     const gotBonus=v.pick&&r&&v.pick===o&&isUnderdog(crowdMap,m.id,v.pick);
     const crowd=locked?crowdVotes(m.id,predictions):null;
-    const cd=locked?null:lockIn(m.id,m.date);
     const showExtra=!!v.extra||!!openExtra[m.id];
     return(
-      <div key={m.id} className={`mc${r?(pts>0?" won":pts<0?" lost":""):v.pick?" voted":""}`}>
-        <span className="mc-cl" style={{background:`linear-gradient(180deg,${TC(m.home)},${TC(m.away)})`}}/>
-        <div className="mc-top">
-          <span className="mc-time">{locked?"🔒":"⏰"} {kickoff(m.id)}</span>
-          {cd&&<span className={`mc-cd${cd.urgent?" urg":""}`}>κλειδωνει σε {cd.txt}</span>}
-          {gotBonus&&<span className="mc-udg">🎖️ +1</span>}
-          {lv&&lv.live&&!r&&<span className="mc-live"><i/>{lv.h}-{lv.a} {lv.clock}</span>}
-          {r&&<span className={`mc-score ${pts>0?"g":pts<0?"r":"n"}`}>{r.h}-{r.a} · {pts>0?`+${pts}`:pts}</span>}
+      <div key={m.id} className={`m${v.pick?" sel":""}${r?(pts>0?" won":pts<0?" lost":""):""}`}
+        style={{"--cl":`linear-gradient(180deg,${TC(m.home)},${TC(m.away)})`}}>
+        <div className="mr">
+          <div className="side">{teamBadge(m.home)}<span className="nm">{SN(m.home)}</span></div>
+          <div className="mmid">
+            {r && <span className={`sc2 ${pts>0?"g":pts<0?"r":"n"}`}>{r.h}-{r.a}</span>}
+            {!r && lv && lv.live && <span className="lv2"><i/>{lv.h}-{lv.a}</span>}
+            {!r && !lv?.live && <span className="vsx">–</span>}
+            {gotBonus&&<span className="udg2">🎖️</span>}
+            {r&&<span className={`ptsx ${pts>0?"g":pts<0?"r":"n"}`}>{pts>0?`+${pts}`:pts}</span>}
+          </div>
+          <div className="side r"><span className="nm">{SN(m.away)}</span>{teamBadge(m.away)}</div>
         </div>
-        <div className="mc-head">
-          <div className="mc-side">{teamBadge(m.home)}<span className="mc-team">{m.home}</span></div>
-          <span className="mc-vs">VS</span>
-          <div className="mc-side">{teamBadge(m.away)}<span className="mc-team">{m.away}</span></div>
-        </div>
-        <div className="mc-row3">
+        <div className="btns">
           {["1","X","2"].map(k=>(
-            <button key={k} className={`vb${v.pick===k?` sel${pw===true?" ok":pw===false?" no":""}`:""}${locked?" lk":""}`}
+            <button key={k} className={`b${v.pick===k?` on${pw===true?" ok":pw===false?" no":""}`:""}${locked?" lk":""}`}
               onClick={()=>!locked&&vote(m,"pick",k)}>
-              <span className="vb-k">{k}</span>
-              <span className="vb-s">{k==="1"?"ΓΗΠΕΔ.":k==="X"?"ΙΣΟΠ.":"ΦΙΛΟΞ."}</span>
-              {crowd&&crowd.n>0&&<span className="vb-p">{k==="1"?crowd.p1:k==="X"?crowd.pX:crowd.p2}%</span>}
+              <span className="b-k">{k}</span>
+              {crowd&&crowd.n>0&&<span className="b-p">{k==="1"?crowd.p1:k==="X"?crowd.pX:crowd.p2}%</span>}
             </button>
           ))}
         </div>
         {!showExtra
-          ? <button className="ex-toggle" onClick={()=>setOpenExtra(o=>({...o,[m.id]:true}))}>
-              <span>+ Εξτρα επιλογη</span><em>GG · NG · Over · Under · +1/−1</em>
-            </button>
-          : <div className="ex-wrap">
-              <div className="mc-lbl">Εξτρα <span className="mc-opt">προαιρετικο</span> <span className="mc-pt">+1 / −1</span></div>
-              <div className="mc-row4">
-                {[["GG","GOAL / GOAL","σκοραρουν και οι 2"],["NG","NO GOAL","δεν σκοραρουν και οι 2"],
-                  ["OV","OVER 2.5","3+ γκολ"],["UN","UNDER 2.5","0-2 γκολ"]].map(([k,l,sub])=>(
-                  <button key={k} className={`vb xb${v.extra===k?` sel${ew===true?" ok":ew===false?" no":""}`:""}${locked?" lk":""}`}
-                    onClick={()=>!locked&&vote(m,"extra",k)}>
-                    <span className="vb-x">{l}</span>
-                    <span className="vb-sub">{sub}</span>
-                    {crowd&&crowd.ne>0&&<span className="vb-p">{crowd.ex[k]}%</span>}
-                  </button>
-                ))}
-              </div>
+          ? <button className="exl" onClick={()=>setOpenExtra(o=>({...o,[m.id]:true}))}>+ εξτρα επιλογη</button>
+          : <div className="exg">
+              {[["GG","GG"],["NG","NG"],["OV","OVER 2.5"],["UN","UNDER 2.5"]].map(([k,l])=>(
+                <button key={k} className={`b xb${v.extra===k?` on${ew===true?" ok":ew===false?" no":""}`:""}${locked?" lk":""}`}
+                  onClick={()=>!locked&&vote(m,"extra",k)}>
+                  <span className="b-x">{l}</span>
+                  {crowd&&crowd.ne>0&&<span className="b-p">{crowd.ex[k]}%</span>}
+                </button>
+              ))}
             </div>}
         {locked&&renderReveal(m.id)}
       </div>
@@ -1018,41 +1082,52 @@ export default function App(){
   }
 
   function renderPredict(){
-    const dts=DATES_OF[comp];
-    // ποια αγωνιστικη δειχνουμε: η επιλεγμενη, αλλιως η σημερινη, αλλιως η επομενη
+    const dts=datesOf[comp];
     const auto = dts.includes(activeDate) ? activeDate : (dts.find(d=>d>=activeDate)||dts[dts.length-1]);
     const shown = (viewDate&&dts.includes(viewDate)) ? viewDate : auto;
     const idx = dts.indexOf(shown);
-    const ms = matchesOn(comp,shown);
-    const md = MD_OF[comp+shown];
-    const isToday = shown===activeDate;
+    const ms = matchesOn(comp,shown,SCH);
+    const md = MD_BY_ID[ms[0]?.id] || "—";
     const future = shown>activeDate;
 
-    // countdown για μελλοντικη αγωνιστικη
     let premiere=null;
     if(future&&ms.length){
       const t=kickoff(ms[0].id)||"22:00";
       const [hh,mm]=t.split(":").map(Number);
       const diff=new Date(`${shown}T${pad2(hh)}:${pad2(mm)}:00`).getTime()-gNow.getTime();
-      if(diff>0){
-        const mins=Math.floor(diff/60000);
-        premiere={d:Math.floor(mins/1440),h:Math.floor((mins%1440)/60),m:mins%60};
-      }
+      if(diff>0){const mins=Math.floor(diff/60000);
+        premiere={d:Math.floor(mins/1440),h:Math.floor((mins%1440)/60),m:mins%60};}
     }
     const votedN=ms.filter(m=>findVote(myPreds,m.id)?.pick).length;
-    const dayP=dayPoints(shown,myPreds,results,comp,crowdMap);
+    const dayP=dayPoints(shown,myPreds,results,comp,crowdMap,SCH);
+
+    // ομαδοποιηση ανα ωρα εναρξης
+    const slots={};
+    ms.forEach(m=>{ (slots[kickoff(m.id)||"—"] ??= []).push(m); });
+    const slotKeys=Object.keys(slots).sort();
 
     return(<>
-      <div className="mdnav">
-        <button className="mdn-b" disabled={idx<=0} onClick={()=>setViewDate(dts[idx-1])}>‹</button>
-        <div className="mdn-c">
-          <div className="mdn-t">ΑΓΩΝΙΣΤΙΚΗ {md}</div>
-          <div className="mdn-d">{caps(fmtLong(shown))}</div>
+      <div className="top">
+        <button className="navb" disabled={idx<=0} onClick={()=>setViewDate(dts[idx-1])}>‹</button>
+        <div className="topc">
+          <div className="topt">ΑΓΩΝΙΣΤΙΚΗ {md}</div>
+          <div className="topd">{caps(fmtLong(shown))}</div>
         </div>
-        <button className="mdn-b" disabled={idx>=dts.length-1} onClick={()=>setViewDate(dts[idx+1])}>›</button>
+        <button className="navb" disabled={idx>=dts.length-1} onClick={()=>setViewDate(dts[idx+1])}>›</button>
       </div>
-      {!isToday&&<button className="mdn-today" onClick={()=>setViewDate(null)}>↺ Επιστροφη στη σημερινη</button>}
-
+      <div className="strip">
+        {ms.length} ματς · <b>{votedN}</b> ψηφισες · <b>{dayP>0?`+${dayP}`:dayP}</b> ποντοι
+        <button className="infob" onClick={()=>setShowRules(v=>!v)}>{showRules?"×":"i"}</button>
+        {shown!==activeDate&&<button className="todayb" onClick={()=>setViewDate(null)}>σημερα</button>}
+      </div>
+      {showRules&&(
+        <div className="rules">
+          <div><b>+2</b> σωστη βασικη · <b>−1</b> λαθος</div>
+          <div><b>+1</b> σωστη εξτρα · <b>−1</b> λαθος · 0 αν δεν παιξεις</div>
+          <div>🎖️ <b>+1</b> αν τη βασικη την ειχε ψηφισει &lt;25% της παρεας</div>
+          <div className="rules-l">🔒 Αλλαζεις ελευθερα μεχρι 15′ πριν τη σεντρα</div>
+        </div>
+      )}
       {premiere&&(
         <div className="prem">
           <div className="prem-glow"/>
@@ -1062,30 +1137,21 @@ export default function App(){
             <div className="pc"><b>{premiere.h}</b><span>ΩΡΕΣ</span></div>
             <div className="pc"><b>{premiere.m}</b><span>ΛΕΠΤΑ</span></div>
           </div>
-          <div className="prem-sub">Ψηφισε απο τωρα και αλλαξε οποτε θες — καθε ματς κλειδωνει 15′ πριν τη σεντρα του</div>
         </div>
       )}
-
-      {!premiere&&(
-        <div className="hero">
-          <div className="hero-glow"/>
-          <div className="hero-ic">{COMPS[comp].icon}</div>
-          <div className="hero-tx">
-            <div className="hero-eye">{caps(COMPS[comp].name)}</div>
-            <div className="hero-t">ΑΓΩΝΙΣΤΙΚΗ {md}</div>
-            <div className="hero-tag">{ms.length} ΜΑΤΣ · {votedN} ΨΗΦΙΣΕΣ</div>
-          </div>
-          <div className="hero-pts"><div className="hp-n">{dayP>0?`+${dayP}`:dayP}</div><div className="hp-l">ΠΟΝΤΟΙ</div></div>
-        </div>
-      )}
-
-      <div className="lockbar">
-        <div>🔒 Αλλαζεις ελευθερα μεχρι 15′ πριν τη σεντρα</div>
-        <div className="lb-rules"><span>Βασικη <b>+2</b>/<b>−1</b></span><span>Εξτρα <b>+1</b>/<b>−1</b></span><span>🎖️ Κοντρα στο ρευμα <b>+1</b></span></div>
-      </div>
       {ms.length===0
         ? <div className="empty"><div className="e-i">{COMPS[comp].icon}</div><h3>ΔΕΝ ΕΧΕΙ ΜΑΤΣ</h3><p>Διαλεξε αλλη αγωνιστικη απο τα βελακια.</p></div>
-        : ms.map(m=>matchCard(m))}
+        : slotKeys.map(k=>{
+            const cd=lockIn(slots[k][0].id,shown);
+            return(<div key={k}>
+              <div className="slot">
+                <span className="slot-t">{k}</span>
+                <span className="slot-l"/>
+                <span className={`slot-c${cd?.urgent?" urg":""}`}>{cd?`κλειδωνει σε ${cd.txt}`:"κλειδωμενο"}</span>
+              </div>
+              {slots[k].map(m=>matchCard(m))}
+            </div>);
+          })}
     </>);
   }
 
@@ -1101,6 +1167,16 @@ export default function App(){
         {[["ALL","Συνολικα"],["UCL","⭐ Champions"],["UEL","🔶 Europa"]].map(([k,l])=>(
           <button key={k} className={`seg${lbComp===k?" on":""}`} onClick={()=>setLbComp(k)}>{l}</button>))}
       </div>
+      {mvp&&(
+        <div className="mvp">
+          <div className="mvp-ic">🏅</div>
+          <div className="mvp-tx">
+            <div className="mvp-l">ΠΑΙΚΤΗΣ ΤΗΣ ΑΓΩΝΙΣΤΙΚΗΣ · {fmtShort(mvp.date)}</div>
+            <div className="mvp-n">{mvp.names.join(" & ")}</div>
+          </div>
+          <div className="mvp-p">+{mvp.pts}</div>
+        </div>
+      )}
       {myB.length>0&&<div className="mybadges"><div className="mb-h">Τα παρασημα μου</div>
         <div className="mb-r">{myB.map((b,i)=><span key={i} className="badge">{b.i} {b.n}</span>)}</div></div>}
       {board.length>=3&&val(board[0])!==0&&(
@@ -1152,7 +1228,7 @@ export default function App(){
       {days.length===0&&<div className="empty" style={{marginTop:"1rem"}}><div className="e-i">📋</div><h3>ΑΚΟΜΑ ΤΙΠΟΤΑ</h3><p>Μολις ψηφισεις θα εμφανιστουν εδω.</p></div>}
       {days.map(d=>{
         const ms=SCHEDULE.filter(m=>m.date===d&&findVote(myPreds,m.id));
-        const dp=dayPoints(d,myPreds,results,null,crowdMap);
+        const dp=dayPoints(d,myPreds,results,null,crowdMap,SCH);
         return(<div key={d} className="hday">
           <div className="hh"><span>{caps(fmtLong(d))}</span><span className={`hp ${dp>0?"pos":dp<0?"neg":""}`}>{dp>0?`+${dp}`:dp}</span></div>
           {ms.map(m=>{const v=findVote(myPreds,m.id),r=results[m.id];const o=outcome1X2(r),ex=outcomeExtra(r);
@@ -1169,11 +1245,11 @@ export default function App(){
   }
 
   function renderAdmin(){
-    const dates=DATES_OF[comp];
-    const ms=matchesOn(comp,adminDate);
+    const dates=datesOf[comp];
+    const ms=matchesOn(comp,adminDate,SCH);
     return(<>
       <div className="ptitle">ADMIN · {COMPS[comp].short}</div>
-      <div className="atabs">{[["results","Σκορ"],["users","Χρηστες"]].map(([k,l])=>(
+      <div className="atabs">{[["results","Σκορ"],["missing","Ψηφοι"],["users","Χρηστες"]].map(([k,l])=>(
         <button key={k} className={`atab${adminTab===k?" on":""}`} onClick={()=>setAdminTab(k)}>{l}</button>))}</div>
       {adminTab==="results"&&(<>
         <div className="info">⚡ Τα αποτελεσματα ερχονται <b>αυτοματα</b> (ESPN) καθε 3 λεπτα οσο παιζουν ματς. Το κουμπι πιο κατω τα τραβαει αμεσως. Αν κατι λειψει, γραψε το σκορ με το χερι.</div>
@@ -1197,9 +1273,36 @@ export default function App(){
                 <button className="sc-b" onClick={()=>saveScore(m.id,dh,da)}>✓</button>
                 {r&&<button className="sc-x" onClick={()=>{saveScore(m.id,"","");setScoreDraft(s=>({...s,[m.id]:{h:"",a:""}}));}}>✕</button>}
               </div>
+              <div className="ar-mv">
+                <span>📅 Μεταφορα:</span>
+                <input className="dt" type="date" value={dateOfMatch(m.id)||""} onChange={e=>moveMatch(m.id,e.target.value)}/>
+                {matchDates[m.id]&&<button className="sc-x" title="Επαναφορα" onClick={()=>moveMatch(m.id,null)}>↺</button>}
+              </div>
             </div>);})}
         </div>
       </>)}
+      {adminTab==="missing"&&(()=>{
+        const dts=datesOf[comp];
+        const d=(viewDate&&dts.includes(viewDate))?viewDate:(dts.includes(activeDate)?activeDate:(dts.find(x=>x>=activeDate)||dts[dts.length-1]));
+        const ms=matchesOn(comp,d,SCH);
+        const rows=users.map(u=>{
+          const p=predictions[u.id]||{};
+          const done=ms.filter(m=>findVote(p,m.id)?.pick).length;
+          return {u,done,tot:ms.length};
+        }).sort((a,b)=>a.done-b.done);
+        const missing=rows.filter(r=>r.done<r.tot);
+        return(<div className="asec">
+          <div className="asec-h">Ψηφοι · {fmtLong(d)}</div>
+          <div className="info">Ποιοι δεν εχουν ψηφισει ολα τα ματς της αγωνιστικης — για υπενθυμιση στο Telegram.</div>
+          {missing.length===0
+            ? <div style={{color:"var(--green)",fontFamily:"'Barlow Condensed',sans-serif",fontSize:".95rem"}}>✓ Ολοι εχουν ψηφισει!</div>
+            : missing.map(r=>(
+              <div key={r.u.id} className="miss">
+                <span className="miss-n">{r.u.username}</span>
+                <span className={`miss-c${r.done===0?" zero":""}`}>{r.done}/{r.tot}</span>
+              </div>))}
+        </div>);
+      })()}
       {adminTab==="users"&&(<div className="asec"><div className="asec-h">Μελη ({users.length})</div>
         <div className="info">➕➖ ποντοι · 🗑️ καθαρισμος ψηφων μερας (για να ξαναψηφισει καποιος)</div>
         {users.map(u=>{
@@ -1695,4 +1798,118 @@ background-size:220% 100%;border-radius:var(--r2);animation:shim 1.4s linear inf
 .sk-bar{height:56px;margin-bottom:.9rem;border-radius:12px;}
 .sk-card{height:200px;margin-bottom:.85rem;}
 
+
+/* ── ΠΑΙΚΤΗΣ ΤΗΣ ΑΓΩΝΙΣΤΙΚΗΣ ── */
+.mvp{display:flex;align-items:center;gap:.8rem;padding:.8rem 1rem;margin-bottom:.9rem;border-radius:var(--r2);
+background:linear-gradient(135deg,rgba(255,215,0,.14),rgba(255,255,255,.05));
+border:1px solid rgba(255,215,0,.38);box-shadow:0 0 24px rgba(255,215,0,.12),inset 0 1px 0 rgba(255,255,255,.14);}
+.mvp-ic{font-size:1.9rem;flex-shrink:0;}
+.mvp-tx{flex:1;min-width:0;}
+.mvp-l{font-family:'Barlow Condensed',sans-serif;font-size:.66rem;font-weight:700;letter-spacing:1.5px;color:#e0c15a;}
+.mvp-n{font-family:'Barlow Condensed',sans-serif;font-size:1.05rem;font-weight:700;color:var(--text);
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.mvp-p{font-family:'Oswald',sans-serif;font-size:1.4rem;font-weight:700;color:#ffd76a;flex-shrink:0;}
+/* ── ADMIN: μεταφορα αγωνα ── */
+.ar-mv{display:flex;align-items:center;gap:.4rem;width:100%;margin-top:.35rem;}
+.ar-mv span{font-family:'Barlow Condensed',sans-serif;font-size:.72rem;color:var(--muted);}
+.dt{flex:1;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.13);border-radius:7px;
+color:var(--text);font-family:'Barlow Condensed',sans-serif;font-size:.8rem;padding:.25rem .4rem;
+outline:none;color-scheme:dark;}
+.dt:focus{border-color:var(--acc);}
+/* ── ADMIN: ποιοι δεν ψηφισαν ── */
+.miss{display:flex;align-items:center;justify-content:space-between;padding:.4rem 0;
+border-bottom:1px solid rgba(255,255,255,.05);}
+.miss:last-child{border-bottom:none;}
+.miss-n{font-family:'Barlow Condensed',sans-serif;font-size:.95rem;font-weight:600;color:var(--text);}
+.miss-c{font-family:'Oswald',sans-serif;font-size:.9rem;font-weight:600;color:#ffb066;
+background:rgba(255,140,0,.12);border:1px solid rgba(255,140,0,.3);border-radius:6px;padding:.05rem .45rem;}
+.miss-c.zero{color:var(--red);background:rgba(255,107,107,.12);border-color:rgba(255,107,107,.3);}
+
+/* ═══ ΝΕΑ ΔΙΑΤΑΞΗ ΨΗΦΟΦΟΡΙΑΣ ═══ */
+.top{display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem;}
+.navb{width:38px;height:38px;flex-shrink:0;border-radius:11px;background:var(--glass);
+border:1px solid var(--gbd);color:var(--acc2);font-size:1.3rem;cursor:pointer;transition:background .15s;}
+.navb:active:not(:disabled){background:rgba(255,255,255,.12);}
+.navb:disabled{opacity:.22;cursor:default;}
+.topc{flex:1;text-align:center;min-width:0;}
+.topt{font-family:'Barlow Condensed',sans-serif;font-size:1.18rem;font-weight:700;letter-spacing:2px;color:var(--text);line-height:1.1;}
+.topd{font-family:'Barlow Condensed',sans-serif;font-size:.76rem;color:var(--muted);letter-spacing:.6px;}
+.strip{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:.45rem;margin-bottom:1rem;
+font-family:'Barlow Condensed',sans-serif;font-size:.8rem;color:var(--muted);letter-spacing:.4px;}
+.strip b{font-family:'Oswald',sans-serif;font-weight:600;color:var(--acc2);}
+.infob,.todayb{background:var(--glass);border:1px solid var(--gbd);color:var(--muted);cursor:pointer;
+font-family:'Barlow Condensed',sans-serif;font-weight:700;}
+.infob{width:20px;height:20px;border-radius:50%;font-size:.7rem;line-height:1;}
+.todayb{border-radius:20px;padding:.1rem .55rem;font-size:.72rem;letter-spacing:.5px;color:var(--acc2);}
+.rules{background:var(--glass);border:1px solid var(--gbd);border-radius:14px;padding:.7rem .85rem;margin-bottom:1rem;
+font-family:'Barlow Condensed',sans-serif;font-size:.84rem;color:var(--text2);line-height:1.65;}
+.rules b{color:var(--acc2);font-family:'Oswald',sans-serif;}
+.rules-l{margin-top:.35rem;padding-top:.35rem;border-top:1px solid rgba(255,255,255,.07);color:var(--muted);font-size:.78rem;}
+/* ── ομαδοποιηση ανα ωρα ── */
+.slot{display:flex;align-items:center;gap:.6rem;margin:1.25rem 0 .5rem;}
+.slot:first-of-type{margin-top:0;}
+.slot-t{font-family:'Oswald',sans-serif;font-size:.98rem;font-weight:600;color:var(--text2);letter-spacing:.5px;}
+.slot-l{flex:1;height:1px;background:linear-gradient(90deg,var(--gbd),transparent);}
+.slot-c{font-family:'Barlow Condensed',sans-serif;font-size:.72rem;color:var(--muted);white-space:nowrap;}
+.slot-c.urg{color:#ffb066;}
+/* ── καρτα ── */
+.m{position:relative;overflow:hidden;background:var(--glass);border-radius:16px;
+padding:.75rem .8rem .5rem;margin-bottom:.5rem;contain:layout paint;transition:background .2s;}
+.m::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--cl);}
+.m.sel{background:rgba(255,255,255,.085);}
+.m.won{background:rgba(61,220,132,.09);}
+.m.lost{background:rgba(255,107,107,.07);}
+.mr{display:flex;align-items:center;gap:.4rem;margin-bottom:.6rem;}
+.side{flex:1;display:flex;align-items:center;gap:.45rem;min-width:0;}
+.side.r{justify-content:flex-end;}
+.bg{width:42px;height:42px;flex-shrink:0;display:flex;align-items:center;justify-content:center;border-radius:50%;
+background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);font-size:1.35rem;
+box-shadow:0 3px 10px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.16);}
+.bg img{width:29px;height:29px;object-fit:contain;filter:drop-shadow(0 2px 3px rgba(0,0,0,.4));}
+.nm{font-family:'Barlow Condensed',sans-serif;font-size:.98rem;font-weight:600;color:var(--text);
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mmid{display:flex;flex-direction:column;align-items:center;gap:.1rem;flex-shrink:0;min-width:30px;}
+.vsx{color:var(--muted);font-size:.9rem;}
+.sc2{font-family:'Oswald',sans-serif;font-size:1.05rem;font-weight:700;padding:.02rem .4rem;border-radius:6px;}
+.sc2.g{background:rgba(61,220,132,.18);color:var(--green);}
+.sc2.r{background:rgba(255,107,107,.15);color:var(--red);}
+.sc2.n{background:rgba(255,255,255,.07);color:var(--text2);}
+.ptsx{font-family:'Oswald',sans-serif;font-size:.72rem;font-weight:600;}
+.ptsx.g{color:var(--green);}.ptsx.r{color:var(--red);}.ptsx.n{color:var(--muted);}
+.udg2{font-size:.8rem;}
+.lv2{display:inline-flex;align-items:center;gap:.25rem;font-family:'Oswald',sans-serif;font-size:.95rem;font-weight:700;
+color:#ff6b6b;background:rgba(255,60,60,.14);border:1px solid rgba(255,60,60,.35);border-radius:6px;padding:.02rem .35rem;}
+.lv2 i{width:6px;height:6px;border-radius:50%;background:#ff3c3c;animation:lp 1.2s infinite;}
+/* ── κουμπια ── */
+.btns{display:grid;grid-template-columns:1fr 1fr 1fr;gap:.3rem;}
+.exg{display:grid;grid-template-columns:1fr 1fr;gap:.3rem;margin-top:.35rem;}
+.b{position:relative;min-height:48px;border-radius:11px;background:rgba(255,255,255,.05);
+border:1px solid var(--gbd);cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.05rem;
+transition:background .12s,border-color .12s,color .12s;-webkit-tap-highlight-color:transparent;}
+.b-k{font-family:'Oswald',sans-serif;font-size:1.2rem;font-weight:600;color:var(--text2);line-height:1;}
+.b-x{font-family:'Barlow Condensed',sans-serif;font-size:.85rem;font-weight:700;letter-spacing:.5px;color:var(--text2);}
+.b-p{font-family:'Barlow Condensed',sans-serif;font-size:.6rem;font-weight:600;color:var(--muted);}
+.xb{min-height:42px;}
+.b:active:not(.lk){background:rgba(255,255,255,.13);}
+.b.on{background:linear-gradient(170deg,#ffffff,#dfe5f2);border-color:#fff;
+box-shadow:0 0 0 2px rgba(255,255,255,.24),0 4px 14px rgba(0,0,0,.4);}
+.b.on .b-k,.b.on .b-x{color:#0d1220;}
+.b.on .b-p{color:#5a6480;}
+.b.on::after{content:'✓';position:absolute;top:-6px;right:-6px;width:19px;height:19px;border-radius:50%;
+background:#0d1220;color:#fff;border:2px solid #fff;font-size:.58rem;font-weight:800;
+display:flex;align-items:center;justify-content:center;}
+.c-UEL .b.on::after{background:#160d03;}
+.b.on.ok{background:linear-gradient(170deg,#43e08c,#2bb46b);border-color:#7ef0b4;box-shadow:0 0 0 2px rgba(67,224,140,.28);}
+.b.on.ok .b-k,.b.on.ok .b-x{color:#04240f;}
+.b.on.ok .b-p{color:#0a3d1e;}
+.b.on.ok::after{background:#04240f;border-color:#7ef0b4;color:#7ef0b4;}
+.b.on.no{background:linear-gradient(170deg,#ff6b6b,#d84545);border-color:#ffa5a5;box-shadow:0 0 0 2px rgba(255,107,107,.26);}
+.b.on.no .b-k,.b.on.no .b-x{color:#2b0606;}
+.b.on.no .b-p{color:#4d0f0f;}
+.b.on.no::after{content:'✕';background:#2b0606;border-color:#ffa5a5;color:#ffa5a5;}
+.b.lk{cursor:default;}
+.b.lk:not(.on){opacity:.32;}
+.exl{width:100%;margin-top:.4rem;background:none;border:none;color:var(--muted);cursor:pointer;
+font-family:'Barlow Condensed',sans-serif;font-size:.78rem;font-weight:600;letter-spacing:.5px;padding:.2rem;}
+.exl:hover{color:var(--acc2);}
 `;
