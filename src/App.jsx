@@ -633,7 +633,8 @@ export default function App(){
   const [sharing,setSharing]=useState(false);
   const [lbComp,setLbComp]=useState("ALL");
   const [openExtra,setOpenExtra]=useState({});
-  const [showRules,setShowRules]=useState(false);   // matchId -> ανοιχτο το εξτρα
+  const [showRules,setShowRules]=useState(false);
+  const [onb,setOnb]=useState(-1);   // -1 κλειστο, 0..2 βημα οδηγου   // matchId -> ανοιχτο το εξτρα
   const [viewDate,setViewDate]=useState(null);   // ποια αγωνιστικη βλεπουμε
   const prevPtsRef=useRef(null);
 
@@ -760,6 +761,7 @@ export default function App(){
       if(!data||data.password!==p){setLerr("Λαθος στοιχεια");setBusy(false);return;}
       localStorage.setItem(LS,JSON.stringify({id:data.id}));
       setMe(data);setView(data.is_admin?"admin":"predict");await loadAll();
+      if(!localStorage.getItem("uefa_onb")) setOnb(0);
     }catch(e){setLerr("Σφαλμα συνδεσης");}
     setBusy(false);
   }
@@ -778,6 +780,7 @@ export default function App(){
       if(error){setRerr("Σφαλμα εγγραφης");setBusy(false);return;}
       localStorage.setItem(LS,JSON.stringify({id:nu.id}));
       setMe(nu);setView("predict");await loadAll();
+      setOnb(0);
     }catch(e){setRerr("Σφαλμα συνδεσης");}
     setBusy(false);
   }
@@ -791,6 +794,7 @@ export default function App(){
     const isSame = cur[field]===val;
     if(isSame && field==="pick") return;              // η βασικη δεν αφαιρειται
     const next={...cur,[field]: isSame ? null : val};
+    try{ navigator.vibrate?.(isSame?8:14); }catch{}
     setPredictions(prev=>{const n={...prev};n[me.id]??={};n[me.id][m.date]??={};
       n[me.id][m.date]={...n[me.id][m.date],[m.id]:next};return n;});
     showToast(
@@ -942,6 +946,16 @@ export default function App(){
     const top=rows.filter(r=>r.p===rows[0].p);
     return {date:d,pts:rows[0].p,names:top.map(r=>r.u.username)};
   },[SCH,users,predictions,results,crowdMap]);
+
+  // Αψηφιστα ματς που κλειδωνουν σε <3 ωρες (και στις δυο διοργανωσεις)
+  const reminder=useMemo(()=>{
+    if(!me) return null;
+    const pend=SCH.filter(m=>m.date===activeDate&&!isLocked(m.id,m.date)&&!findVote(myPreds,m.id)?.pick);
+    if(!pend.length) return null;
+    const soonest=pend.map(m=>lockIn(m.id,m.date)).filter(Boolean).sort((a,b)=>a.mins-b.mins)[0];
+    if(!soonest||soonest.mins>180) return null;
+    return {n:pend.length,txt:soonest.txt,urgent:soonest.mins<=30,comps:[...new Set(pend.map(m=>m.comp))]};
+  },[me,SCH,activeDate,myPreds,nowTick,tOffset]);
 
   const todayMatches=matchesOn(comp,activeDate);
 
@@ -1211,29 +1225,71 @@ export default function App(){
   }
 
   function renderHistory(){
-    const days=ALL_DATES.filter(d=>d<=activeDate&&SCHEDULE.some(m=>m.date===d&&findVote(myPreds,m.id))).reverse();
+    const days=ALL_DATES.filter(d=>d<=activeDate&&SCH.some(m=>m.date===d&&findVote(myPreds,m.id))).reverse();
     const st=playerStats(myPreds,results);
+    const stU=playerStats(myPreds,results,"UCL"), stE=playerStats(myPreds,results,"UEL");
+    const myRank=board.findIndex(u=>u.id===me?.id)+1;
+    // ανα αγωνιστικη μερα: ποντοι
+    const perDay=ALL_DATES.filter(d=>SCH.some(m=>m.date===d&&results[m.id])).map(d=>({d,p:dayPoints(d,myPreds,results,null,crowdMap,SCH)}));
+    const best=perDay.length?perDay.reduce((a,b)=>b.p>a.p?b:a):null;
+    const worst=perDay.length?perDay.reduce((a,b)=>b.p<a.p?b:a):null;
+    // μπονους που πηρα
+    let bonuses=0;
+    SCH.forEach(m=>{const v=findVote(myPreds,m.id);const r=results[m.id];
+      if(v?.pick&&r&&v.pick===outcome1X2(r)&&isUnderdog(crowdMap,m.id,v.pick))bonuses++;});
+    const initials=(me?.username||"?").slice(0,2).toUpperCase();
     return(<>
-      <div className="ptitle">ΤΟ ΙΣΤΟΡΙΚΟ ΜΟΥ</div>
+      <div className="prof">
+        <div className="prof-av">{initials}</div>
+        <div className="prof-tx">
+          <div className="prof-n">{me?.username}</div>
+          <div className="prof-s">{myRank?`#${myRank} στην καταταξη`:"—"} · {voteStreak(myPreds)}🔥 σερι</div>
+        </div>
+        <div className={`prof-p ${(myBoard?.total||0)<0?"neg":""}`}>{(myBoard?.total||0)>0?`+${myBoard.total}`:(myBoard?.total||0)}</div>
+      </div>
+
       <div className="stats4">
         <div className="s4"><div className="s4n gd">{st.correct}</div><div className="s4l">Σωστα</div></div>
         <div className="s4"><div className="s4n rd">{st.wrong}</div><div className="s4l">Λαθος</div></div>
         <div className="s4"><div className="s4n">{st.pct}%</div><div className="s4l">Ευστοχια</div></div>
-        <div className="s4"><div className="s4n or">{voteStreak(myPreds)}🔥</div><div className="s4l">Σερι</div></div>
+        <div className="s4"><div className="s4n or">{bonuses}</div><div className="s4l">🎖️ Μπονους</div></div>
       </div>
+
+      <div className="prow">
+        <div className="pcell">
+          <div className="pcell-h">⭐ CHAMPIONS</div>
+          <div className="pcell-n">{myBoard?.ucl>0?`+${myBoard.ucl}`:(myBoard?.ucl??0)}</div>
+          <div className="pcell-s">{stU.correct}/{stU.correct+stU.wrong} σωστα · {stU.pct}%</div>
+        </div>
+        <div className="pcell">
+          <div className="pcell-h">🔶 EUROPA</div>
+          <div className="pcell-n">{myBoard?.uel>0?`+${myBoard.uel}`:(myBoard?.uel??0)}</div>
+          <div className="pcell-s">{stE.correct}/{stE.correct+stE.wrong} σωστα · {stE.pct}%</div>
+        </div>
+      </div>
+
+      {best&&(
+        <div className="prow">
+          <div className="pcell"><div className="pcell-h">📈 ΚΑΛΥΤΕΡΗ ΜΕΡΑ</div><div className="pcell-n g">{best.p>0?`+${best.p}`:best.p}</div><div className="pcell-s">{fmtShort(best.d)}</div></div>
+          <div className="pcell"><div className="pcell-h">📉 ΧΕΙΡΟΤΕΡΗ ΜΕΡΑ</div><div className="pcell-n r">{worst.p>0?`+${worst.p}`:worst.p}</div><div className="pcell-s">{fmtShort(worst.d)}</div></div>
+        </div>
+      )}
+
       <div className="stats4" style={{marginTop:".5rem"}}>
         <div className="s4"><div className="s4n gd">{st.exCorrect}</div><div className="s4l">Εξτρα σωστα</div></div>
         <div className="s4"><div className="s4n rd">{st.exWrong}</div><div className="s4l">Εξτρα λαθος</div></div>
       </div>
-      {days.length===0&&<div className="empty" style={{marginTop:"1rem"}}><div className="e-i">📋</div><h3>ΑΚΟΜΑ ΤΙΠΟΤΑ</h3><p>Μολις ψηφισεις θα εμφανιστουν εδω.</p></div>}
+
+      <div className="ptitle" style={{marginTop:"1.3rem",fontSize:"1.1rem"}}>ΟΙ ΕΠΙΛΟΓΕΣ ΜΟΥ</div>
+      {days.length===0&&<div className="empty" style={{marginTop:".6rem"}}><div className="e-i">📋</div><h3>ΑΚΟΜΑ ΤΙΠΟΤΑ</h3><p>Μολις ψηφισεις θα εμφανιστουν εδω.</p></div>}
       {days.map(d=>{
-        const ms=SCHEDULE.filter(m=>m.date===d&&findVote(myPreds,m.id));
+        const ms=SCH.filter(m=>m.date===d&&findVote(myPreds,m.id));
         const dp=dayPoints(d,myPreds,results,null,crowdMap,SCH);
         return(<div key={d} className="hday">
           <div className="hh"><span>{caps(fmtLong(d))}</span><span className={`hp ${dp>0?"pos":dp<0?"neg":""}`}>{dp>0?`+${dp}`:dp}</span></div>
           {ms.map(m=>{const v=findVote(myPreds,m.id),r=results[m.id];const o=outcome1X2(r),ex=outcomeExtra(r);
             return(<div key={m.id} className="hr">
-              <span className="hm">{COMPS[m.comp].icon} {m.home.slice(0,11)} – {m.away.slice(0,11)}</span>
+              <span className="hm">{COMPS[m.comp].icon} {SN(m.home)} – {SN(m.away)}</span>
               <span className="hpk">
                 <b className={r?(v.pick===o?"ok":"no"):""}>{v.pick||"—"}</b>
                 {v.extra&&<em className={r?(ex[v.extra]?"ok":"no"):""}>{v.extra}</em>}
@@ -1347,7 +1403,7 @@ export default function App(){
         <header className="hdr">
           <div className="logo"><img className="logo-img" src={LOGO} alt="Euro Picks"/></div>
           <nav className="nav">
-            {[{k:"predict",l:"Ψηφισε"},{k:"leaderboard",l:"Καταταξη"},{k:"history",l:"Ιστορικο"},...(me.is_admin?[{k:"admin",l:"Admin"}]:[])].map(n=>(
+            {[{k:"predict",l:"Ψηφισε"},{k:"leaderboard",l:"Καταταξη"},{k:"history",l:"Προφιλ"},...(me.is_admin?[{k:"admin",l:"Admin"}]:[])].map(n=>(
               <button key={n.k} className={`nb${view===n.k?" on":""}`} onClick={()=>setView(n.k)}>{n.l}</button>))}
           </nav>
           <div className="hdr-r">
@@ -1365,17 +1421,46 @@ export default function App(){
             </button>))}
         </div>
         <main className="main">
+          {reminder&&view!=="admin"&&(
+            <button className={`remind${reminder.urgent?" urg":""}`}
+              onClick={()=>{setView("predict");setViewDate(null);if(reminder.comps.length===1)setComp(reminder.comps[0]);}}>
+              <span className="rm-i">⏰</span>
+              <span className="rm-t">Δεν ψηφισες <b>{reminder.n}</b> ματς</span>
+              <span className="rm-c">κλειδωνει σε {reminder.txt} ›</span>
+            </button>
+          )}
           {view==="predict"&&renderPredict()}
           {view==="leaderboard"&&renderLeaderboard()}
           {view==="history"&&renderHistory()}
           {view==="admin"&&me.is_admin&&renderAdmin()}
         </main>
         <nav className="bnav">
-          {[{k:"predict",l:"Ψηφισε",i:"⚽"},{k:"leaderboard",l:"Καταταξη",i:"📊"},{k:"history",l:"Ιστορικο",i:"📋"},...(me.is_admin?[{k:"admin",l:"Admin",i:"⚙️"}]:[])].map(n=>(
+          {[{k:"predict",l:"Ψηφισε",i:"⚽"},{k:"leaderboard",l:"Καταταξη",i:"📊"},{k:"history",l:"Προφιλ",i:"👤"},...(me.is_admin?[{k:"admin",l:"Admin",i:"⚙️"}]:[])].map(n=>(
             <button key={n.k} className={`bn${view===n.k?" on":""}`} onClick={()=>setView(n.k)}>
               <span className="bn-i">{n.i}</span><span className="bn-l">{n.l}</span></button>))}
         </nav>
       </>)}
+      {onb>=0&&(()=>{
+        const steps=[
+          {ic:"⚽",t:"ΨΗΦΙΣΕ ΤΟ 1 / Χ / 2",d:"Σε καθε ματς διαλεξε ποιος κερδιζει. Σωστο +2, λαθος −1. Μπορεις να ψηφισεις μερες πριν και να αλλαξεις οσες φορες θες."},
+          {ic:"🎲",t:"ΠΑΙΞΕ ΕΞΤΡΑ (ΑΝ ΤΟΛΜΑΣ)",d:"Προαιρετικα: Goal-Goal, No Goal, Over ή Under 2.5. Σωστο +1, λαθος −1. Αν βρεις τη βασικη κοντρα στην παρεα, +1 μπονους."},
+          {ic:"🔒",t:"ΚΛΕΙΔΩΝΕΙ 15′ ΠΡΙΝ",d:"Καθε ματς κλειδωνει 15 λεπτα πριν τη σεντρα. Μετα βλεπεις τι ψηφισαν ολοι, και οι ποντοι μπαινουν αυτοματα μολις τελειωσει."},
+        ];
+        const st=steps[onb];
+        const close=()=>{localStorage.setItem("uefa_onb","1");setOnb(-1);};
+        return(<div className="onb-bg" onClick={close}>
+          <div className="onb" onClick={e=>e.stopPropagation()}>
+            <div className="onb-ic">{st.ic}</div>
+            <div className="onb-t">{st.t}</div>
+            <div className="onb-d">{st.d}</div>
+            <div className="onb-dots">{steps.map((_,i)=><i key={i} className={i===onb?"on":""}/>)}</div>
+            <div className="onb-b">
+              <button className="onb-skip" onClick={close}>Παραλειψη</button>
+              <button className="onb-next" onClick={()=>onb<2?setOnb(onb+1):close()}>{onb<2?"Επομενο":"Παμε!"}</button>
+            </div>
+          </div>
+        </div>);
+      })()}
       {confetti&&<Confetti/>}
       {toast&&<div className={`toast ${toast.type}`}>{toast.msg}</div>}
     </div>
@@ -1912,4 +1997,55 @@ display:flex;align-items:center;justify-content:center;}
 .exl{width:100%;margin-top:.4rem;background:none;border:none;color:var(--muted);cursor:pointer;
 font-family:'Barlow Condensed',sans-serif;font-size:.78rem;font-weight:600;letter-spacing:.5px;padding:.2rem;}
 .exl:hover{color:var(--acc2);}
+
+/* ── ΥΠΕΝΘΥΜΙΣΗ ── */
+.remind{width:100%;display:flex;align-items:center;gap:.6rem;padding:.65rem .9rem;margin-bottom:.9rem;
+border-radius:14px;cursor:pointer;text-align:left;
+background:linear-gradient(135deg,rgba(255,140,0,.2),rgba(255,140,0,.08));border:1px solid rgba(255,140,0,.45);
+box-shadow:0 0 22px rgba(255,140,0,.15);color:var(--text);}
+.remind.urg{background:linear-gradient(135deg,rgba(255,60,60,.24),rgba(255,60,60,.1));border-color:rgba(255,80,80,.55);
+box-shadow:0 0 22px rgba(255,60,60,.2);animation:pulseUrg 1.6s infinite;}
+.rm-i{font-size:1.3rem;flex-shrink:0;}
+.rm-t{flex:1;font-family:'Barlow Condensed',sans-serif;font-size:.98rem;font-weight:600;}
+.rm-t b{font-family:'Oswald',sans-serif;font-size:1.05rem;color:#ffb066;}
+.remind.urg .rm-t b{color:#ff8a8a;}
+.rm-c{font-family:'Barlow Condensed',sans-serif;font-size:.78rem;color:var(--text2);white-space:nowrap;}
+/* ── ΟΔΗΓΟΣ ΠΡΩΤΗΣ ΕΙΣΟΔΟΥ ── */
+.onb-bg{position:fixed;inset:0;z-index:9000;background:rgba(3,5,12,.82);backdrop-filter:blur(8px);
+display:flex;align-items:center;justify-content:center;padding:1.5rem;}
+.onb{width:100%;max-width:360px;background:linear-gradient(160deg,#131a30,#0b1020);border:1px solid rgba(147,197,253,.3);
+border-radius:22px;padding:2rem 1.6rem 1.4rem;text-align:center;box-shadow:0 30px 70px rgba(0,0,0,.7);
+animation:rise .4s cubic-bezier(.2,.8,.2,1) both;}
+.onb-ic{font-size:3.2rem;line-height:1;margin-bottom:.9rem;}
+.onb-t{font-family:'Barlow Condensed',sans-serif;font-size:1.35rem;font-weight:700;letter-spacing:2px;color:#93c5fd;margin-bottom:.6rem;}
+.onb-d{font-family:'Barlow Condensed',sans-serif;font-size:1rem;color:#a8b0c8;line-height:1.5;min-height:4.5em;}
+.onb-dots{display:flex;justify-content:center;gap:.4rem;margin:1.1rem 0;}
+.onb-dots i{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.18);transition:.2s;}
+.onb-dots i.on{background:#93c5fd;width:22px;border-radius:4px;}
+.onb-b{display:flex;gap:.5rem;}
+.onb-skip{flex:1;padding:.7rem;border-radius:12px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);
+color:#6b7490;font-family:'Barlow Condensed',sans-serif;font-size:.95rem;font-weight:700;letter-spacing:1px;cursor:pointer;}
+.onb-next{flex:2;padding:.7rem;border-radius:12px;border:none;cursor:pointer;
+background:linear-gradient(135deg,#1e40af,#3b82f6);color:#fff;font-family:'Barlow Condensed',sans-serif;
+font-size:1rem;font-weight:700;letter-spacing:2px;box-shadow:0 6px 20px rgba(59,130,246,.35);}
+/* ── ΠΡΟΦΙΛ ── */
+.prof{display:flex;align-items:center;gap:.85rem;padding:1rem 1.1rem;margin-bottom:.8rem;border-radius:var(--r2);
+background:linear-gradient(135deg,var(--accdim),rgba(255,255,255,.05));border:1px solid var(--accbd);
+box-shadow:0 10px 30px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.12);}
+.prof-av{width:56px;height:56px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+font-family:'Barlow Condensed',sans-serif;font-size:1.4rem;font-weight:700;letter-spacing:1px;color:var(--text);
+background:linear-gradient(140deg,rgba(255,255,255,.2),rgba(255,255,255,.06));border:2px solid var(--accbd);}
+.prof-tx{flex:1;min-width:0;}
+.prof-n{font-family:'Barlow Condensed',sans-serif;font-size:1.35rem;font-weight:700;color:var(--text);
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.prof-s{font-family:'Barlow Condensed',sans-serif;font-size:.8rem;color:var(--muted);letter-spacing:.3px;}
+.prof-p{font-family:'Oswald',sans-serif;font-size:2rem;font-weight:700;color:var(--acc2);flex-shrink:0;}
+.prof-p.neg{color:var(--red);}
+.prow{display:flex;gap:.45rem;margin-top:.5rem;}
+.pcell{flex:1;background:var(--glass);border:1px solid var(--gbd);border-radius:var(--r);padding:.7rem .6rem;text-align:center;
+box-shadow:inset 0 1px 0 rgba(255,255,255,.1);}
+.pcell-h{font-family:'Barlow Condensed',sans-serif;font-size:.62rem;font-weight:700;letter-spacing:1.2px;color:var(--muted);margin-bottom:.2rem;}
+.pcell-n{font-family:'Oswald',sans-serif;font-size:1.5rem;font-weight:700;color:var(--acc2);line-height:1;}
+.pcell-n.g{color:var(--green);}.pcell-n.r{color:var(--red);}
+.pcell-s{font-family:'Barlow Condensed',sans-serif;font-size:.7rem;color:var(--text2);margin-top:.25rem;}
 `;
