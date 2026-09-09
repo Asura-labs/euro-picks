@@ -538,23 +538,57 @@ const sameTeam=(mine,espn)=>{const k=TEAM_KEY[mine];return k?normTeam(espn).incl
 
 // Μετατροπη αμερικανικης αποδοσης (+250 / -110) σε δεκαδικη (3.50 / 1.91)
 const amToDec=v=>{ if(v==null||isNaN(v)||v===0) return null; return v>0 ? 1+v/100 : 1+100/Math.abs(v); };
-// Διαβαζει μια πλευρα αποδοσεων του ESPN, οποια μορφη κι αν εχει
-function readML(t){
-  if(t==null) return null;
-  if(typeof t==="number") return amToDec(t);
-  const dec=t.current?.moneyLine?.decimal ?? t.decimal ?? null;
-  if(dec!=null&&!isNaN(dec)&&dec>1) return Number(dec);
-  let am=t.moneyLine ?? t.current?.moneyLine?.american ?? t.current?.moneyLine?.value ?? t.american ?? null;
-  if(typeof am==="string") am=parseFloat(am.replace("+",""));
-  return amToDec(am);
+// Βαθια αναζητηση αποδοσης — το ESPN αλλαζει μορφη αναλογα με τη διοργανωση/παροχο
+function deepML(node,depth){
+  depth=depth||0;
+  if(node==null||depth>5) return null;
+  if(typeof node==="number") return Math.abs(node)>=100 ? amToDec(node) : (node>1.01&&node<300?node:null);
+  if(typeof node==="string"){
+    const n=parseFloat(node.replace(/[+\s]/g,""));
+    if(isNaN(n)) return null;
+    return Math.abs(n)>=100 ? amToDec(n) : (n>1.01&&n<300?n:null);
+  }
+  if(typeof node!=="object") return null;
+  // 1) ετοιμη δεκαδικη
+  for(const k of ["decimal","decimalOdds","euro"]){
+    let v=node[k]; if(typeof v==="string") v=parseFloat(v);
+    if(typeof v==="number"&&v>1.01&&v<300) return v;
+  }
+  // 2) αμερικανικη
+  for(const k of ["american","americanOdds","moneyLine","moneyline"]){
+    let v=node[k];
+    if(typeof v==="string") v=parseFloat(v.replace(/[+\s]/g,""));
+    if(typeof v==="number"&&Math.abs(v)>=100&&Math.abs(v)<100000) return amToDec(v);
+  }
+  // 3) βαθυτερα, σε γνωστα κουτια
+  for(const k of ["current","close","open","moneyLine","moneyline","odds","value","price"]){
+    if(node[k]!=null){ const r=deepML(node[k],depth+1); if(r!=null) return r; }
+  }
+  return null;
 }
 function extractOdds(c){
-  const o=(c.odds||[])[0]; if(!o) return null;
-  const h=readML(o.homeTeamOdds), a=readML(o.awayTeamOdds), d=readML(o.drawOdds);
-  if(h==null&&a==null&&d==null) return null;
+  const list=c.odds||[];
+  if(!list.length) return null;
   const r2=v=>v==null?null:Math.round(v*100)/100;
-  return {h:r2(h),x:r2(d),a:r2(a),prov:o.provider?.name||"",
-    ou:(o.overUnder!=null?Number(o.overUnder):null)};
+  // δοκιμαζουμε ολους τους παροχους μεχρι να βρουμε πληρη τριαδα
+  let best=null;
+  for(const o of list){
+    const side=(k1,k2)=>{
+      let v=deepML(o[k1]);
+      if(v==null&&o.moneyline) v=deepML(o.moneyline[k2]);
+      if(v==null&&o.moneyLine) v=deepML(o.moneyLine[k2]);
+      if(v==null&&o[k2]) v=deepML(o[k2]);
+      return v;
+    };
+    const h=side("homeTeamOdds","home"), a=side("awayTeamOdds","away"), d=side("drawOdds","draw");
+    if(h==null&&a==null&&d==null) continue;
+    const cand={h:r2(h),x:r2(d),a:r2(a),prov:o.provider?.name||"",
+      ou:(o.overUnder!=null?Number(o.overUnder):null)};
+    const filled=[cand.h,cand.x,cand.a].filter(v=>v!=null).length;
+    if(filled===3) return cand;              // πληρες — τελος
+    if(!best||filled>[best.h,best.x,best.a].filter(v=>v!=null).length) best=cand;
+  }
+  return best;
 }
 
 // Επιστρεφει { matchId: {h,a,live,done,clock} } για τη συγκεκριμενη ημερομηνια
@@ -587,12 +621,14 @@ async function fetchESPN(comp,date){
     if(H.team?.logo) logos[mine.home]=H.team.logo;
     if(A.team?.logo) logos[mine.away]=A.team.logo;
     const od=extractOdds(c); if(od) odds[mine.id]=od;
+    if(c.odds?.[0]&&!window.__espnOddsSample){window.__espnOddsSample=c.odds[0];console.debug("[EuroPicks] ESPN odds sample:",c.odds[0]);}
     out[mine.id]={h:Number(H.score??0),a:Number(A.score??0),done,live:state==="in",
       clock:c.status?.displayClock||""};
   });
   return {scores:out,logos,odds};
 }
 
+const oddsFill=o=>o?[o.h,o.x,o.a].filter(v=>v!=null).length:0;
 const LS="uefa_session";
 
 function LoginScreen({mode,setMode,lf,setLf,rf,setRf,lerr,rerr,onLogin,onReg,busy}){
@@ -854,7 +890,7 @@ export default function App(){
       const newLogos={...both[0].logos,...both[1].logos};
       const newOdds={...(both[0].odds||{}),...(both[1].odds||{})};
       // αποδοσεις -> βαση (μονο νεες — οι υπαρχουσες μενουν ακομα κι αν χαθουν μετα τη ληξη)
-      const addO=Object.entries(newOdds).filter(([id])=>!odds[id]);
+      const addO=Object.entries(newOdds).filter(([id,v])=>oddsFill(v)>oddsFill(odds[id]));
       if(addO.length){
         const no={...odds}; addO.forEach(([id,v])=>{no[id]=v;});
         setOdds(no);
@@ -912,6 +948,16 @@ export default function App(){
     setResults(merged);
     await supabase.from("game_data").upsert({key:"results",value:merged,updated_at:new Date().toISOString()});
     showToast("Αποτελεσμα αποθηκευτηκε");
+  }
+  // Σβηνει τις αποθηκευμενες αποδοσεις μιας ημερομηνιας και τις ξανατραβαει
+  async function refreshOdds(date){
+    const ids=matchesOn(comp,date,SCH).map(m=>m.id);
+    const cleaned={...odds}; ids.forEach(id=>delete cleaned[id]);
+    setOdds(cleaned);
+    await supabase.from("game_data").upsert({key:"odds",value:cleaned,updated_at:new Date().toISOString()});
+    oddsTried.current[date]=false;
+    await syncLive(date,false);
+    showToast("Αποδοσεις ανανεωθηκαν");
   }
   async function saveHandle(v){
     let h=(v||"").trim().replace(/^@+/,"");
@@ -1066,7 +1112,7 @@ export default function App(){
     const auto=dts.includes(activeDate)?activeDate:(dts.find(d=>d>=activeDate)||dts[dts.length-1]);
     const shown=(viewDate&&dts.includes(viewDate))?viewDate:auto;
     if(!shown||shown<activeDate) return;              // παλιες αγωνιστικες: οχι
-    const missing=matchesOn(comp,shown,SCH).some(m=>!odds[m.id]);
+    const missing=matchesOn(comp,shown,SCH).some(m=>oddsFill(odds[m.id])<3);
     if(!missing||oddsTried.current[shown]) return;
     oddsTried.current[shown]=true;
     syncLive(shown);
@@ -1171,7 +1217,7 @@ export default function App(){
             <button key={k} className={`b${v.pick===k?` on${pw===true?" ok":pw===false?" no":""}`:""}${locked?" lk":""}`}
               onClick={()=>!locked&&vote(m,"pick",k)}>
               <span className="b-k">{k}</span>
-              {od&&!crowd&&<span className="b-o">{fmtO(k==="1"?od.h:k==="X"?od.x:od.a)||"–"}</span>}
+              {od&&oddsFill(od)>=2&&!crowd&&<span className="b-o">{fmtO(k==="1"?od.h:k==="X"?od.x:od.a)||"–"}</span>}
               {crowd&&crowd.n>0&&<span className="b-p">{k==="1"?crowd.p1:k==="X"?crowd.pX:crowd.p2}%</span>}
             </button>
           ))}
@@ -1184,6 +1230,7 @@ export default function App(){
                 <button key={k} className={`b xb${v.extra===k?` on${ew===true?" ok":ew===false?" no":""}`:""}${locked?" lk":""}`}
                   onClick={()=>!locked&&vote(m,"extra",k)}>
                   <span className="b-x">{l}</span>
+                  {od&&!crowd&&(k==="OV"||k==="UN")&&od.ou===2.5&&<span className="b-o">{fmtO(k==="OV"?od.ov:od.un)||""}</span>}
                   {crowd&&crowd.ne>0&&<span className="b-p">{crowd.ex[k]}%</span>}
                 </button>
               ))}
@@ -1436,7 +1483,9 @@ export default function App(){
           {syncing?"⏳ Ανακτηση...":"🔄 Ανακτηση αποτελεσματων"}
         </button>
         {lastSync&&<div className="sync-t">Τελευταιος συγχρονισμος: {new Date(lastSync).toLocaleTimeString("el-GR")}</div>}
+        <button className="logo-b" onClick={()=>refreshOdds(adminDate)} disabled={syncing}>💰 Ανανεωση αποδοσεων ({matchesOn(comp,adminDate,SCH).filter(m=>oddsFill(odds[m.id])>=2).length}/{matchesOn(comp,adminDate,SCH).length})</button>
         <button className="logo-b" onClick={harvestLogos} disabled={syncing}>🖼️ Κατεβασε λογοτυπα ομαδων ({Object.keys(logos).length}/72)</button>
+        <button className="logo-b" onClick={async()=>{setOdds({});await supabase.from("game_data").upsert({key:"odds",value:{},updated_at:new Date().toISOString()});oddsTried.current={};showToast("Οι αποδοσεις θα ξανακατεβουν");}} disabled={syncing}>🔄 Ανανεωση αποδοσεων</button>
         <div className="dstrip">{dates.map(d=><button key={d} className={`dtab${d===adminDate?" on":""}`} onClick={()=>setAdminDate(d)}>{fmtShort(d)}</button>)}</div>
         <div className="asec"><div className="asec-h">{fmtLong(adminDate)}</div>
           {ms.map(m=>{
