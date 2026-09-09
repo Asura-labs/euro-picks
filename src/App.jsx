@@ -614,18 +614,28 @@ async function fetchESPN(comp,date){
     const H=cs.find(x=>x.homeAway==="home"), A=cs.find(x=>x.homeAway==="away");
     if(!H||!A)return;
     const hn=H.team?.displayName||H.team?.name, an=A.team?.displayName||A.team?.name;
-    const st=c.status?.type||{};
-    const done=!!st.completed, state=st.state; // pre | in | post
+    const stt=c.status||ev.status||{};
+    const st=stt.type||{};
+    const rawState=(st.state||st.name||st.description||"").toString().toLowerCase();
+    const done=!!st.completed || /final|full ?time|\bft\b|post/.test(rawState);
+    const state=/in|live|half|progress/.test(rawState) && !done ? "in" : (done?"post":"pre");
     const mine=SCHEDULE.find(m=>m.comp===comp&&m.date===date&&sameTeam(m.home,hn)&&sameTeam(m.away,an));
     if(!mine)return;
     if(H.team?.logo) logos[mine.home]=H.team.logo;
     if(A.team?.logo) logos[mine.away]=A.team.logo;
     const od=extractOdds(c); if(od) odds[mine.id]=od;
     if(c.odds?.[0]&&!window.__espnOddsSample){window.__espnOddsSample=c.odds[0];console.debug("[EuroPicks] ESPN odds sample:",c.odds[0]);}
-    out[mine.id]={h:Number(H.score??0),a:Number(A.score??0),done,live:state==="in",
-      clock:c.status?.displayClock||""};
+    const sc=x=>{const v=(typeof x?.score==="object")?(x.score?.value??x.score?.displayValue):x?.score;const n=Number(v);return isNaN(n)?0:n;};
+    out[mine.id]={h:sc(H),a:sc(A),done,live:state==="in",
+      clock:stt.displayClock||stt.type?.shortDetail||""};
   });
-  return {scores:out,logos,odds};
+  return {scores:out,logos,odds,
+    diag:{events:(data.events||[]).length,matched:Object.keys(out).length,
+      sample:(data.events||[]).slice(0,3).map(e=>{
+        const cc=e.competitions?.[0]||{}; const ss=cc.status||e.status||{};
+        const cs=cc.competitors||[];
+        return `${(cs.find(x=>x.homeAway==="home")?.team?.displayName)||"?"} ${cs.find(x=>x.homeAway==="home")?.score??"-"}-${cs.find(x=>x.homeAway==="away")?.score??"-"} ${(cs.find(x=>x.homeAway==="away")?.team?.displayName)||"?"} [${ss.type?.state||ss.type?.name||"?"}]`;
+      })}};
 }
 
 const oddsFill=o=>o?[o.h,o.x,o.a].filter(v=>v!=null).length:0;
@@ -708,6 +718,7 @@ export default function App(){
   const [odds,setOdds]=useState({});             // matchId -> {h,x,a,prov,ou}
   const [handles,setHandles]=useState({});       // userId -> @telegram
   const [hDraft,setHDraft]=useState(null);
+  const [diag,setDiag]=useState(null);
   const [tOffset,setTOffset]=useState(0);       // διαφορα ρολογιου συσκευης απο server
   const [syncing,setSyncing]=useState(false);
   const [lastSync,setLastSync]=useState(null);
@@ -950,6 +961,20 @@ export default function App(){
     showToast("Αποτελεσμα αποθηκευτηκε");
   }
   // Σβηνει τις αποθηκευμενες αποδοσεις μιας ημερομηνιας και τις ξανατραβαει
+  // Δειχνει ΑΚΡΙΒΩΣ τι επιστρεφει το ESPN για μια ημερομηνια
+  async function runDiag(date){
+    setSyncing(true); setDiag(null);
+    const out=[];
+    for(const c of ["UCL","UEL"]){
+      try{
+        const r=await fetchESPN(c,date);
+        const liveN=Object.values(r.scores).filter(v=>v.live).length;
+        const doneN=Object.values(r.scores).filter(v=>v.done).length;
+        out.push({c,ok:true,ev:r.diag.events,matched:r.diag.matched,live:liveN,done:doneN,sample:r.diag.sample});
+      }catch(e){ out.push({c,ok:false,err:e.message}); }
+    }
+    setDiag({date,out}); setSyncing(false);
+  }
   async function refreshOdds(date){
     const ids=matchesOn(comp,date,SCH).map(m=>m.id);
     const cleaned={...odds}; ids.forEach(id=>delete cleaned[id]);
@@ -1503,6 +1528,20 @@ export default function App(){
           {syncing?"⏳ Ανακτηση...":"🔄 Ανακτηση αποτελεσματων"}
         </button>
         {lastSync&&<div className="sync-t">Τελευταιος συγχρονισμος: {new Date(lastSync).toLocaleTimeString("el-GR")}</div>}
+        <button className="logo-b" onClick={()=>runDiag(adminDate)} disabled={syncing}>🩺 Διαγνωστικος ελεγχος ESPN</button>
+        {diag&&(
+          <div className="diag">
+            <div className="diag-h">Αποτελεσμα για {fmtShort(diag.date)}</div>
+            {diag.out.map(d=>(
+              <div key={d.c} className="diag-b">
+                <b>{d.c}:</b> {d.ok
+                  ? <>{d.ev} ματς απο ESPN · {d.matched} ταιριαξαν · <span style={{color:"#ff6b6b"}}>{d.live} live</span> · <span style={{color:"#3ddc84"}}>{d.done} τελειωσαν</span></>
+                  : <span style={{color:"#ff6b6b"}}>ΣΦΑΛΜΑ: {d.err}</span>}
+                {d.sample?.map((x,i)=><div key={i} className="diag-s">{x}</div>)}
+              </div>
+            ))}
+          </div>
+        )}
         <button className="logo-b" onClick={()=>refreshOdds(adminDate)} disabled={syncing}>💰 Ανανεωση αποδοσεων ({matchesOn(comp,adminDate,SCH).filter(m=>oddsFill(odds[m.id])>=2).length}/{matchesOn(comp,adminDate,SCH).length})</button>
         <button className="logo-b" onClick={harvestLogos} disabled={syncing}>🖼️ Κατεβασε λογοτυπα ομαδων ({Object.keys(logos).length}/72)</button>
         <button className="logo-b" onClick={async()=>{setOdds({});await supabase.from("game_data").upsert({key:"odds",value:{},updated_at:new Date().toISOString()});oddsTried.current={};showToast("Οι αποδοσεις θα ξανακατεβουν");}} disabled={syncing}>🔄 Ανανεωση αποδοσεων</button>
@@ -2275,4 +2314,9 @@ padding:.3rem .6rem;cursor:pointer;font-family:'Barlow Condensed',sans-serif;fon
 .bk{padding:.8rem .9rem;margin-bottom:1rem;border-radius:12px;background:rgba(61,220,132,.07);border:1px solid rgba(61,220,132,.28);}
 .bk-t{font-family:'Barlow Condensed',sans-serif;font-size:.95rem;font-weight:700;letter-spacing:1px;color:var(--green);margin-bottom:.25rem;}
 .bk-d{font-family:'Barlow Condensed',sans-serif;font-size:.82rem;color:var(--text2);line-height:1.4;margin-bottom:.6rem;}
+
+.diag{background:rgba(255,255,255,.05);border:1px solid var(--gbd);border-radius:10px;padding:.6rem .7rem;margin-bottom:.6rem;}
+.diag-h{font-family:'Barlow Condensed',sans-serif;font-size:.8rem;font-weight:700;letter-spacing:1px;color:var(--acc2);margin-bottom:.35rem;}
+.diag-b{font-family:'Barlow Condensed',sans-serif;font-size:.8rem;color:var(--text2);margin-bottom:.4rem;line-height:1.4;}
+.diag-s{font-family:monospace;font-size:.66rem;color:var(--muted);margin-left:.5rem;word-break:break-word;}
 `;
