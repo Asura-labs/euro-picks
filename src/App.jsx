@@ -1119,20 +1119,40 @@ export default function App(){
   },[me,view,comp,viewDate,activeDate,datesOf,SCH,odds,syncLive]);
 
   // ── ΑΥΤΟΜΑΤΟΣ ΣΥΓΧΡΟΝΙΣΜΟΣ ──
-  // Τρεχει μονο οταν υπαρχουν ματς που εχουν ξεκινησει και δεν εχουν τελικο αποτελεσμα.
+  // Ο ελεγχος γινεται ΜΕΣΑ στο interval με φρεσκα δεδομενα, ωστε να ξεκιναει
+  // ο συγχρονισμος ακομα κι αν η εφαρμογη ανοιξε ΠΡΙΝ τη σεντρα.
+  const syncRef=useRef({});
+  syncRef.current={SCH,results,matchTimes,activeDate,tOffset,syncLive};
   useEffect(()=>{
     if(!me) return;
-    const pending=SCHEDULE.filter(m=>m.date===activeDate).some(m=>{
-      if(results[m.id]) return false;               // εχει ηδη αποτελεσμα
-      const t=kickoff(m.id); if(!t) return false;
-      const [h,mi]=t.split(":").map(Number);
-      return gNow.getTime()>=new Date(`${activeDate}T${pad2(h)}:${pad2(mi)}:00`).getTime();
-    });
-    if(!pending) return;
-    syncLive(activeDate);
-    const iv=setInterval(()=>syncLive(activeDate),180000); // καθε 3 λεπτα
+    const check=()=>{
+      const R=syncRef.current;
+      const now=new Date(new Date(Date.now()+R.tOffset).toLocaleString("en-US",{timeZone:"Europe/Athens"}));
+      // τα ματς της τρεχουσας ΚΑΙ της χθεσινης βραδιας (για οψιμα αποτελεσματα)
+      const days=[R.activeDate,addDays(R.activeDate,-1)];
+      const pending=R.SCH.filter(m=>days.includes(m.date)).some(m=>{
+        if(R.results[m.id]) return false;
+        const t=R.matchTimes[m.id]||SCHED_BY_ID[m.id]?.gtime; if(!t) return false;
+        const [h,mi]=t.split(":").map(Number); if(isNaN(h)) return false;
+        const ko=new Date(`${m.date}T${String(h).padStart(2,"0")}:${String(mi).padStart(2,"0")}:00`).getTime();
+        // απο τη σεντρα και μεχρι 6 ωρες μετα
+        return now.getTime()>=ko && now.getTime()<=ko+6*3600*1000;
+      });
+      if(pending) R.syncLive(R.activeDate);
+    };
+    check();
+    const iv=setInterval(check,120000);   // ελεγχος καθε 2 λεπτα
     return()=>clearInterval(iv);
-  },[me,activeDate,results,nowTick>0]);
+  },[me]);
+
+  // Συγχρονισμος οταν επιστρεφεις στην εφαρμογη (π.χ. ξεκλειδωνεις το κινητο)
+  useEffect(()=>{
+    if(!me) return;
+    const onWake=()=>{ if(document.visibilityState==="visible"){ setNowTick(Date.now()); syncRef.current.syncLive(syncRef.current.activeDate); } };
+    document.addEventListener("visibilitychange",onWake);
+    window.addEventListener("focus",onWake);
+    return()=>{document.removeEventListener("visibilitychange",onWake);window.removeEventListener("focus",onWake);};
+  },[me]);
 
   async function shareLeaderboard(){
     setSharing(true);
