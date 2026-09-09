@@ -536,6 +536,27 @@ const normTeam=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f
   .replace(/[^a-z0-9 /]/g," ").replace(/\s+/g," ").trim();
 const sameTeam=(mine,espn)=>{const k=TEAM_KEY[mine];return k?normTeam(espn).includes(normTeam(k)):false;};
 
+// Μετατροπη αμερικανικης αποδοσης (+250 / -110) σε δεκαδικη (3.50 / 1.91)
+const amToDec=v=>{ if(v==null||isNaN(v)||v===0) return null; return v>0 ? 1+v/100 : 1+100/Math.abs(v); };
+// Διαβαζει μια πλευρα αποδοσεων του ESPN, οποια μορφη κι αν εχει
+function readML(t){
+  if(t==null) return null;
+  if(typeof t==="number") return amToDec(t);
+  const dec=t.current?.moneyLine?.decimal ?? t.decimal ?? null;
+  if(dec!=null&&!isNaN(dec)&&dec>1) return Number(dec);
+  let am=t.moneyLine ?? t.current?.moneyLine?.american ?? t.current?.moneyLine?.value ?? t.american ?? null;
+  if(typeof am==="string") am=parseFloat(am.replace("+",""));
+  return amToDec(am);
+}
+function extractOdds(c){
+  const o=(c.odds||[])[0]; if(!o) return null;
+  const h=readML(o.homeTeamOdds), a=readML(o.awayTeamOdds), d=readML(o.drawOdds);
+  if(h==null&&a==null&&d==null) return null;
+  const r2=v=>v==null?null:Math.round(v*100)/100;
+  return {h:r2(h),x:r2(d),a:r2(a),prov:o.provider?.name||"",
+    ou:(o.overUnder!=null?Number(o.overUnder):null)};
+}
+
 // Επιστρεφει { matchId: {h,a,live,done,clock} } για τη συγκεκριμενη ημερομηνια
 async function fetchESPN(comp,date){
   const ymd=date.replace(/-/g,"");
@@ -550,7 +571,7 @@ async function fetchESPN(comp,date){
     }catch(e){err=e.message;}
   }
   if(!data) throw new Error(err||"Δεν φορτωσαν τα δεδομενα");
-  const out={},logos={};
+  const out={},logos={},odds={};
   const lgl=(data.leagues?.[0]?.logos||[]).find(x=>(x.rel||[]).includes("dark"))||data.leagues?.[0]?.logos?.[0];
   if(lgl?.href) logos["__"+comp]=lgl.href;
   (data.events||[]).forEach(ev=>{
@@ -565,10 +586,11 @@ async function fetchESPN(comp,date){
     if(!mine)return;
     if(H.team?.logo) logos[mine.home]=H.team.logo;
     if(A.team?.logo) logos[mine.away]=A.team.logo;
+    const od=extractOdds(c); if(od) odds[mine.id]=od;
     out[mine.id]={h:Number(H.score??0),a:Number(A.score??0),done,live:state==="in",
       clock:c.status?.displayClock||""};
   });
-  return {scores:out,logos};
+  return {scores:out,logos,odds};
 }
 
 const LS="uefa_session";
@@ -647,6 +669,9 @@ export default function App(){
   const [live,setLive]=useState({});        // matchId -> {h,a,live,done,clock}
   const [logos,setLogos]=useState({});      // teamName -> logo url
   const [matchDates,setMatchDates]=useState({}); // matchId -> νεα ημερομηνια (αναβολες)
+  const [odds,setOdds]=useState({});             // matchId -> {h,x,a,prov,ou}
+  const [handles,setHandles]=useState({});       // userId -> @telegram
+  const [hDraft,setHDraft]=useState(null);
   const [tOffset,setTOffset]=useState(0);       // διαφορα ρολογιου συσκευης απο server
   const [syncing,setSyncing]=useState(false);
   const [lastSync,setLastSync]=useState(null);
@@ -729,6 +754,8 @@ export default function App(){
         if(r.key==="adjustments")setAdjustments(r.value||{});
         if(r.key==="logos")setLogos(r.value||{});
         if(r.key==="matchDates")setMatchDates(r.value||{});
+        if(r.key==="odds")setOdds(r.value||{});
+        if(r.key==="handles")setHandles(r.value||{});
       });
     }catch(e){console.error(e);}
   },[]);
@@ -790,20 +817,29 @@ export default function App(){
   async function vote(m,field,val){
     if(isLocked(m.id,m.date)){showToast("Η ψηφοφορια εκλεισε","err");return;}
     const cur=findVote(predictions[me.id],m.id)||{pick:null,extra:null};
-    // Ξαναπατημα της ιδιας ΕΞΤΡΑ επιλογης = αφαιρεση (ειναι προαιρετικη)
+    // Ξαναπατημα της ιδιας επιλογης = αφαιρεση (και στη βασικη και στην εξτρα)
     const isSame = cur[field]===val;
-    if(isSame && field==="pick") return;              // η βασικη δεν αφαιρειται
     const next={...cur,[field]: isSame ? null : val};
     try{ navigator.vibrate?.(isSame?8:14); }catch{}
-    setPredictions(prev=>{const n={...prev};n[me.id]??={};n[me.id][m.date]??={};
-      n[me.id][m.date]={...n[me.id][m.date],[m.id]:next};return n;});
+    const empty=!next.pick&&!next.extra;
+    setPredictions(prev=>{
+      const n={...prev};n[me.id]??={};n[me.id][m.date]??={};
+      const day={...n[me.id][m.date]};
+      if(empty) delete day[m.id]; else day[m.id]=next;
+      n[me.id][m.date]=day; return n;
+    });
     showToast(
-      isSame ? "Εξτρα επιλογη αφαιρεθηκε"
+      isSame ? (field==="pick"?"Η ψηφος αφαιρεθηκε":"Εξτρα επιλογη αφαιρεθηκε")
       : cur[field] ? "Η επιλογη σου αλλαξε"
       : field==="pick" ? "Ψηφισες" : "Εξτρα επιλογη"
     );
-    const {error}=await supabase.from("predictions")
-      .upsert({user_id:me.id,match_id:m.id,match_date:m.date,pick:next.pick,extra:next.extra},{onConflict:"user_id,match_id"});
+    let error;
+    if(empty){
+      ({error}=await supabase.from("predictions").delete().eq("user_id",me.id).eq("match_id",m.id));
+    }else{
+      ({error}=await supabase.from("predictions")
+        .upsert({user_id:me.id,match_id:m.id,match_date:m.date,pick:next.pick,extra:next.extra},{onConflict:"user_id,match_id"}));
+    }
     if(error){showToast("Σφαλμα — δοκιμασε ξανα","err");loadAll();}
   }
 
@@ -813,9 +849,17 @@ export default function App(){
     if(!date) return;
     setSyncing(true);
     try{
-      const both=await Promise.all(["UCL","UEL"].map(c=>fetchESPN(c,date).catch(()=>({scores:{},logos:{}}))));
+      const both=await Promise.all(["UCL","UEL"].map(c=>fetchESPN(c,date).catch(()=>({scores:{},logos:{},odds:{}}))));
       const merged={...both[0].scores,...both[1].scores};
       const newLogos={...both[0].logos,...both[1].logos};
+      const newOdds={...(both[0].odds||{}),...(both[1].odds||{})};
+      // αποδοσεις -> βαση (μονο νεες — οι υπαρχουσες μενουν ακομα κι αν χαθουν μετα τη ληξη)
+      const addO=Object.entries(newOdds).filter(([id])=>!odds[id]);
+      if(addO.length){
+        const no={...odds}; addO.forEach(([id,v])=>{no[id]=v;});
+        setOdds(no);
+        await supabase.from("game_data").upsert({key:"odds",value:no,updated_at:new Date().toISOString()});
+      }
       setLive(l=>({...l,...merged}));
       setLastSync(Date.now());
       // νεα λογοτυπα -> βαση
@@ -842,7 +886,7 @@ export default function App(){
       }
     }catch(e){ if(manual) showToast("Σφαλμα: "+e.message,"err"); }
     setSyncing(false);
-  },[results,logos]);
+  },[results,logos,odds]);
 
   // Μαζευει λογοτυπα ολων των ομαδων απο ολες τις αγωνιστικες (μια φορα)
   async function harvestLogos(){
@@ -868,6 +912,51 @@ export default function App(){
     setResults(merged);
     await supabase.from("game_data").upsert({key:"results",value:merged,updated_at:new Date().toISOString()});
     showToast("Αποτελεσμα αποθηκευτηκε");
+  }
+  async function saveHandle(v){
+    let h=(v||"").trim().replace(/^@+/,"");
+    const merged={...handles}; if(h) merged[me.id]="@"+h; else delete merged[me.id];
+    setHandles(merged); setHDraft(null);
+    await supabase.from("game_data").upsert({key:"handles",value:merged,updated_at:new Date().toISOString()});
+    showToast(h?"Telegram αποθηκευτηκε":"Telegram αφαιρεθηκε");
+  }
+  // ── BACKUP: πληρης εξαγωγη ──
+  async function exportBackup(){
+    try{
+      const [{data:us},{data:gd}]=await Promise.all([supabase.from("users").select("*"),supabase.from("game_data").select("*")]);
+      const preds=[];let from=0;
+      for(let i=0;i<60;i++){const {data}=await supabase.from("predictions").select("*").range(from,from+999);
+        if(!data||!data.length)break;preds.push(...data);if(data.length<1000)break;from+=1000;}
+      const stamp=new Date().toISOString().slice(0,16).replace(/[:T]/g,"-");
+      // 1) JSON πληρες (για επαναφορα)
+      const full={exported:new Date().toISOString(),users:us,predictions:preds,game_data:gd};
+      dl(new Blob([JSON.stringify(full,null,1)],{type:"application/json"}),`europicks-backup-${stamp}.json`);
+      // 2) CSV αναγνωσιμο (καταταξη + ψηφοι)
+      const esc=x=>'"'+String(x??"").replace(/"/g,'""')+'"';
+      const rows=[["Παικτης","Συνολο","UCL","UEL","Σωστα","Λαθος","Ευστοχια%"].map(esc).join(",")];
+      board.forEach(u=>rows.push([u.username,u.total,u.ucl,u.uel,u.st.correct,u.st.wrong,u.st.pct].map(esc).join(",")));
+      rows.push("");rows.push(["Παικτης","Ματς","Γηπεδουχος","Φιλοξενουμενη","Ημερομηνια","Βασικη","Εξτρα","Σκορ","Ποντοι"].map(esc).join(","));
+      const uname={};(us||[]).forEach(u=>{uname[u.id]=u.username;});
+      preds.forEach(p=>{const m=SCHED_BY_ID[p.match_id];if(!m)return;const r=results[p.match_id];
+        rows.push([uname[p.user_id]||p.user_id,p.match_id,m.home,m.away,dateOfMatch(p.match_id),p.pick||"",p.extra||"",
+          r?`${r.h}-${r.a}`:"",r?matchPoints(p.pick,p.extra,r,crowdMap,p.match_id):""].map(esc).join(","));});
+      dl(new Blob(["\ufeff"+rows.join("\n")],{type:"text/csv;charset=utf-8"}),`europicks-${stamp}.csv`);
+      showToast("Backup κατεβηκε (2 αρχεια)");
+    }catch(e){showToast("Σφαλμα backup","err");}
+  }
+  function dl(blob,name){const u=URL.createObjectURL(blob);const a=document.createElement("a");a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),2000);}
+  // ── ΥΠΕΝΘΥΜΙΣΗ TELEGRAM: ετοιμο μηνυμα με @mentions ──
+  async function copyReminder(rows,date,md){
+    const miss=rows.filter(r=>r.done<r.tot);
+    if(!miss.length){showToast("Ολοι εχουν ψηφισει");return;}
+    const first=matchesOn(comp,date,SCH)[0];
+    const cd=first?lockIn(first.id,date):null;
+    const names=miss.map(r=>handles[r.u.id]||r.u.username).join(" ");
+    const txt=`⏰ ΥΠΕΝΘΥΜΙΣΗ — ${COMPS[comp].short} Αγωνιστικη ${md}\n`+
+      (cd?`Κλειδωνει σε ${cd.txt}!\n`:"")+
+      `Δεν εχουν ψηφισει ολα τα ματς:\n${names}\n\n👉 ${window.location.origin}`;
+    try{await navigator.clipboard.writeText(txt);showToast("Αντιγραφηκε — κολλησε το στο Telegram");}
+    catch{prompt("Αντιγραψε το μηνυμα:",txt);}
   }
   async function moveMatch(id,newDate){
     const merged={...matchDates};
@@ -969,6 +1058,20 @@ export default function App(){
 
   useEffect(()=>{ setViewDate(null); if(!adminDate) setAdminDate(datesOf[comp][0]||""); },[comp]);
 
+  // ── ΑΠΟΔΟΣΕΙΣ: μια φορα ανα αγωνιστικη που βλεπεις (αν λειπουν) ──
+  const oddsTried=useRef({});
+  useEffect(()=>{
+    if(!me||view!=="predict") return;
+    const dts=datesOf[comp];
+    const auto=dts.includes(activeDate)?activeDate:(dts.find(d=>d>=activeDate)||dts[dts.length-1]);
+    const shown=(viewDate&&dts.includes(viewDate))?viewDate:auto;
+    if(!shown||shown<activeDate) return;              // παλιες αγωνιστικες: οχι
+    const missing=matchesOn(comp,shown,SCH).some(m=>!odds[m.id]);
+    if(!missing||oddsTried.current[shown]) return;
+    oddsTried.current[shown]=true;
+    syncLive(shown);
+  },[me,view,comp,viewDate,activeDate,datesOf,SCH,odds,syncLive]);
+
   // ── ΑΥΤΟΜΑΤΟΣ ΣΥΓΧΡΟΝΙΣΜΟΣ ──
   // Τρεχει μονο οταν υπαρχουν ματς που εχουν ξεκινησει και δεν εχουν τελικο αποτελεσμα.
   useEffect(()=>{
@@ -1047,6 +1150,8 @@ export default function App(){
     const gotBonus=v.pick&&r&&v.pick===o&&isUnderdog(crowdMap,m.id,v.pick);
     const crowd=locked?crowdVotes(m.id,predictions):null;
     const showExtra=!!v.extra||!!openExtra[m.id];
+    const od=odds[m.id];
+    const fmtO=x=>x==null?null:x.toFixed(2);
     return(
       <div key={m.id} className={`m${v.pick?" sel":""}${r?(pts>0?" won":pts<0?" lost":""):""}`}
         style={{"--cl":`linear-gradient(180deg,${TC(m.home)},${TC(m.away)})`}}>
@@ -1066,10 +1171,12 @@ export default function App(){
             <button key={k} className={`b${v.pick===k?` on${pw===true?" ok":pw===false?" no":""}`:""}${locked?" lk":""}`}
               onClick={()=>!locked&&vote(m,"pick",k)}>
               <span className="b-k">{k}</span>
+              {od&&!crowd&&<span className="b-o">{fmtO(k==="1"?od.h:k==="X"?od.x:od.a)||"–"}</span>}
               {crowd&&crowd.n>0&&<span className="b-p">{k==="1"?crowd.p1:k==="X"?crowd.pX:crowd.p2}%</span>}
             </button>
           ))}
         </div>
+        {od&&od.prov&&!locked&&<div className="b-prov">αποδοσεις {od.prov}{od.ou!=null?` · O/U ${od.ou}`:""}</div>}
         {!showExtra
           ? <button className="exl" onClick={()=>setOpenExtra(o=>({...o,[m.id]:true}))}>+ εξτρα επιλογη</button>
           : <div className="exg">
@@ -1248,6 +1355,22 @@ export default function App(){
         <div className={`prof-p ${(myBoard?.total||0)<0?"neg":""}`}>{(myBoard?.total||0)>0?`+${myBoard.total}`:(myBoard?.total||0)}</div>
       </div>
 
+      <div className="tg">
+        <span className="tg-i">✈️</span>
+        {hDraft===null
+          ? <>
+              <span className="tg-t">{handles[me?.id]
+                ? <>Telegram: <b>{handles[me.id]}</b></>
+                : <>Βαλε το Telegram σου για <b>υπενθυμισεις</b></>}</span>
+              <button className="tg-b" onClick={()=>setHDraft((handles[me?.id]||"").replace(/^@/,""))}>{handles[me?.id]?"Αλλαγη":"Προσθηκη"}</button>
+            </>
+          : <>
+              <span className="tg-at">@</span>
+              <input className="tg-in" autoFocus value={hDraft} placeholder="username" onChange={e=>setHDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveHandle(hDraft)}/>
+              <button className="tg-b" onClick={()=>saveHandle(hDraft)}>✓</button>
+              <button className="tg-x" onClick={()=>setHDraft(null)}>✕</button>
+            </>}
+      </div>
       <div className="stats4">
         <div className="s4"><div className="s4n gd">{st.correct}</div><div className="s4l">Σωστα</div></div>
         <div className="s4"><div className="s4n rd">{st.wrong}</div><div className="s4l">Λαθος</div></div>
@@ -1347,9 +1470,17 @@ export default function App(){
           return {u,done,tot:ms.length};
         }).sort((a,b)=>a.done-b.done);
         const missing=rows.filter(r=>r.done<r.tot);
+        const md=MD_BY_ID[ms[0]?.id]||"—";
+        const withTg=missing.filter(r=>handles[r.u.id]).length;
         return(<div className="asec">
           <div className="asec-h">Ψηφοι · {fmtLong(d)}</div>
-          <div className="info">Ποιοι δεν εχουν ψηφισει ολα τα ματς της αγωνιστικης — για υπενθυμιση στο Telegram.</div>
+          <div className="info">Ποιοι δεν εχουν ψηφισει ολα τα ματς. Το κουμπι ετοιμαζει μηνυμα με @mentions — το κολλας στο Telegram και τους χτυπαει το κινητο.</div>
+          {missing.length>0&&(
+            <button className="sync-b" onClick={()=>copyReminder(rows,d,md)}>📋 Αντιγραφη υπενθυμισης ({missing.length})</button>
+          )}
+          {missing.length>0&&withTg<missing.length&&(
+            <div className="sync-t">{withTg}/{missing.length} εχουν βαλει Telegram — οι υπολοιποι θα εμφανιστουν με το ονομα τους</div>
+          )}
           {missing.length===0
             ? <div style={{color:"var(--green)",fontFamily:"'Barlow Condensed',sans-serif",fontSize:".95rem"}}>✓ Ολοι εχουν ψηφισει!</div>
             : missing.map(r=>(
@@ -1359,7 +1490,13 @@ export default function App(){
               </div>))}
         </div>);
       })()}
-      {adminTab==="users"&&(<div className="asec"><div className="asec-h">Μελη ({users.length})</div>
+      {adminTab==="users"&&(<div className="asec">
+        <div className="bk">
+          <div className="bk-t">💾 Backup</div>
+          <div className="bk-d">Κατεβαζει ολα τα δεδομενα (χρηστες, ψηφοι, αποτελεσματα) σε 2 αρχεια: JSON για επαναφορα, CSV για ανοιγμα σε Excel. Καν' το καθε 1-2 εβδομαδες.</div>
+          <button className="sync-b" onClick={exportBackup}>⬇️ Κατεβασε backup</button>
+        </div>
+        <div className="asec-h">Μελη ({users.length})</div>
         <div className="info">➕➖ ποντοι · 🗑️ καθαρισμος ψηφων μερας (για να ξαναψηφισει καποιος)</div>
         {users.map(u=>{
           const p=predictions[u.id]||{};
@@ -1974,6 +2111,10 @@ transition:background .12s,border-color .12s,color .12s;-webkit-tap-highlight-co
 .b-k{font-family:'Oswald',sans-serif;font-size:1.2rem;font-weight:600;color:var(--text2);line-height:1;}
 .b-x{font-family:'Barlow Condensed',sans-serif;font-size:.85rem;font-weight:700;letter-spacing:.5px;color:var(--text2);}
 .b-p{font-family:'Barlow Condensed',sans-serif;font-size:.6rem;font-weight:600;color:var(--muted);}
+.b-o{font-family:'Oswald',sans-serif;font-size:.68rem;font-weight:500;color:var(--acc2);letter-spacing:.3px;opacity:.9;}
+.b.on .b-o{color:#3d4664;opacity:1;}
+.b-prov{font-family:'Barlow Condensed',sans-serif;font-size:.62rem;color:var(--muted);text-align:right;
+margin-top:.25rem;letter-spacing:.3px;opacity:.75;}
 .xb{min-height:42px;}
 .b:active:not(.lk){background:rgba(255,255,255,.13);}
 .b.on{background:linear-gradient(170deg,#ffffff,#dfe5f2);border-color:#fff;
@@ -2048,4 +2189,21 @@ box-shadow:inset 0 1px 0 rgba(255,255,255,.1);}
 .pcell-n{font-family:'Oswald',sans-serif;font-size:1.5rem;font-weight:700;color:var(--acc2);line-height:1;}
 .pcell-n.g{color:var(--green);}.pcell-n.r{color:var(--red);}
 .pcell-s{font-family:'Barlow Condensed',sans-serif;font-size:.7rem;color:var(--text2);margin-top:.25rem;}
+
+/* ── TELEGRAM ── */
+.tg{display:flex;align-items:center;gap:.5rem;padding:.6rem .85rem;margin-bottom:.6rem;border-radius:12px;
+background:rgba(0,136,204,.1);border:1px solid rgba(0,136,204,.32);}
+.tg-i{font-size:1.1rem;flex-shrink:0;}
+.tg-t{flex:1;font-family:'Barlow Condensed',sans-serif;font-size:.85rem;color:var(--text2);min-width:0;}
+.tg-t b{color:#5bc0ff;}
+.tg-at{font-family:'Oswald',sans-serif;color:#5bc0ff;font-weight:600;}
+.tg-in{flex:1;min-width:0;background:rgba(255,255,255,.06);border:1px solid rgba(0,136,204,.4);border-radius:8px;
+color:var(--text);font-family:'Inter',sans-serif;font-size:.9rem;padding:.35rem .5rem;outline:none;}
+.tg-b{background:rgba(0,136,204,.25);border:1px solid rgba(0,136,204,.5);color:#5bc0ff;border-radius:8px;
+padding:.3rem .6rem;cursor:pointer;font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:.8rem;letter-spacing:.5px;white-space:nowrap;}
+.tg-x{background:none;border:1px solid var(--gbd);color:var(--muted);border-radius:8px;padding:.3rem .5rem;cursor:pointer;}
+/* ── BACKUP ── */
+.bk{padding:.8rem .9rem;margin-bottom:1rem;border-radius:12px;background:rgba(61,220,132,.07);border:1px solid rgba(61,220,132,.28);}
+.bk-t{font-family:'Barlow Condensed',sans-serif;font-size:.95rem;font-weight:700;letter-spacing:1px;color:var(--green);margin-bottom:.25rem;}
+.bk-d{font-family:'Barlow Condensed',sans-serif;font-size:.82rem;color:var(--text2);line-height:1.4;margin-bottom:.6rem;}
 `;
