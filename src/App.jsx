@@ -567,7 +567,7 @@ function deepML(node,depth){
   return null;
 }
 function extractOdds(c){
-  const list=c.odds||[];
+  const list=Array.isArray(c&&c.odds)?c.odds.filter(x=>x&&typeof x==="object"):[];
   if(!list.length) return null;
   const r2=v=>v==null?null:Math.round(v*100)/100;
   // δοκιμαζουμε ολους τους παροχους μεχρι να βρουμε πληρη τριαδα
@@ -608,7 +608,10 @@ async function fetchESPN(comp,date){
   const out={},logos={},odds={};
   const lgl=(data.leagues?.[0]?.logos||[]).find(x=>(x.rel||[]).includes("dark"))||data.leagues?.[0]?.logos?.[0];
   if(lgl?.href) logos["__"+comp]=lgl.href;
+  let bad=0;
   (data.events||[]).forEach(ev=>{
+   try{
+    if(!ev||typeof ev!=="object")return;
     const c=ev.competitions?.[0]; if(!c)return;
     const cs=c.competitors||[];
     const H=cs.find(x=>x.homeAway==="home"), A=cs.find(x=>x.homeAway==="away");
@@ -623,19 +626,30 @@ async function fetchESPN(comp,date){
     if(!mine)return;
     if(H.team?.logo) logos[mine.home]=H.team.logo;
     if(A.team?.logo) logos[mine.away]=A.team.logo;
-    const od=extractOdds(c); if(od) odds[mine.id]=od;
+    try{ const od=extractOdds(c); if(od) odds[mine.id]=od; }catch{}
     if(c.odds?.[0]&&!window.__espnOddsSample){window.__espnOddsSample=c.odds[0];console.debug("[EuroPicks] ESPN odds sample:",c.odds[0]);}
     const sc=x=>{const v=(typeof x?.score==="object")?(x.score?.value??x.score?.displayValue):x?.score;const n=Number(v);return isNaN(n)?0:n;};
     out[mine.id]={h:sc(H),a:sc(A),done,live:state==="in",
       clock:stt.displayClock||stt.type?.shortDetail||""};
+   }catch(err){ bad++; console.warn("[EuroPicks] προβλημα σε ματς:",err?.message); }
   });
+  let sample=[];
+  try{
+    sample=(data.events||[]).slice(0,4).map(e=>{
+      try{
+        const cc=(e&&e.competitions&&e.competitions[0])||{};
+        const ss=cc.status||e.status||{};
+        const cs=Array.isArray(cc.competitors)?cc.competitors:[];
+        const hh=cs.find(x=>x&&x.homeAway==="home")||{}, aa=cs.find(x=>x&&x.homeAway==="away")||{};
+        const nm=t=>(t&&t.team&&(t.team.displayName||t.team.name))||"?";
+        const scv=t=>(t&&t.score!=null)?(typeof t.score==="object"?(t.score.displayValue??t.score.value??"-"):t.score):"-";
+        const stx=(ss.type&&(ss.type.state||ss.type.name))||"?";
+        return `${nm(hh)} ${scv(hh)}-${scv(aa)} ${nm(aa)} [${stx}]`;
+      }catch(e2){ return "σπασμενη εγγραφη"; }
+    });
+  }catch{}
   return {scores:out,logos,odds,
-    diag:{events:(data.events||[]).length,matched:Object.keys(out).length,
-      sample:(data.events||[]).slice(0,3).map(e=>{
-        const cc=e.competitions?.[0]||{}; const ss=cc.status||e.status||{};
-        const cs=cc.competitors||[];
-        return `${(cs.find(x=>x.homeAway==="home")?.team?.displayName)||"?"} ${cs.find(x=>x.homeAway==="home")?.score??"-"}-${cs.find(x=>x.homeAway==="away")?.score??"-"} ${(cs.find(x=>x.homeAway==="away")?.team?.displayName)||"?"} [${ss.type?.state||ss.type?.name||"?"}]`;
-      })}};
+    diag:{events:(data.events||[]).length,matched:Object.keys(out).length,bad,sample}};
 }
 
 const oddsFill=o=>o?[o.h,o.x,o.a].filter(v=>v!=null).length:0;
@@ -970,7 +984,7 @@ export default function App(){
         const r=await fetchESPN(c,date);
         const liveN=Object.values(r.scores).filter(v=>v.live).length;
         const doneN=Object.values(r.scores).filter(v=>v.done).length;
-        out.push({c,ok:true,ev:r.diag.events,matched:r.diag.matched,live:liveN,done:doneN,sample:r.diag.sample});
+        out.push({c,ok:true,ev:r.diag.events,matched:r.diag.matched,bad:r.diag.bad||0,live:liveN,done:doneN,sample:r.diag.sample});
       }catch(e){ out.push({c,ok:false,err:e.message}); }
     }
     setDiag({date,out}); setSyncing(false);
@@ -1535,7 +1549,7 @@ export default function App(){
             {diag.out.map(d=>(
               <div key={d.c} className="diag-b">
                 <b>{d.c}:</b> {d.ok
-                  ? <>{d.ev} ματς απο ESPN · {d.matched} ταιριαξαν · <span style={{color:"#ff6b6b"}}>{d.live} live</span> · <span style={{color:"#3ddc84"}}>{d.done} τελειωσαν</span></>
+                  ? <>{d.ev} ματς απο ESPN · {d.matched} ταιριαξαν · <span style={{color:"#ff6b6b"}}>{d.live} live</span> · <span style={{color:"#3ddc84"}}>{d.done} τελειωσαν</span>{d.bad>0&&<span style={{color:"#ffb066"}}> · {d.bad} προβληματικα</span>}</>
                   : <span style={{color:"#ff6b6b"}}>ΣΦΑΛΜΑ: {d.err}</span>}
                 {d.sample?.map((x,i)=><div key={i} className="diag-s">{x}</div>)}
               </div>
